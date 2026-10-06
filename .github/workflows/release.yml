@@ -2,7 +2,7 @@ name: Release
 
 # Публикация релиза в HACS при пуше git-тега.
 # Тег вида: v1.1.0 (stable) или v1.2.0-beta1 (beta).
-# HACS подхватит новый релиз и покажет уведомление об обновлении.
+# HACS подхватит релиз по тегу и покажет уведомление об обновлении.
 
 on:
   push:
@@ -18,18 +18,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Read version from tag
-        id: version
+      - name: Read tag metadata
+        id: meta
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          echo "tag=$TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          # Если тег содержит "-beta" — это bета-версия
           if [[ "$TAG" == *beta* ]]; then
-            echo "channel=beta" >> "$GITHUB_OUTPUT"
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
-            echo "channel=stable" >> "$GITHUB_OUTPUT"
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -38,35 +34,19 @@ jobs:
           test -f hacs.json || { echo "hacs.json missing"; exit 1; }
           test -f custom_components/akvilon_home/manifest.json || { echo "manifest missing"; exit 1; }
 
-      - name: Verify version matches tag
-        run: |
-          VERSION_IN_MANIFEST=$(python3 -c "import json;print(json.load(open('custom_components/akvilon_home/manifest.json'))['version'])")
-          TAG="${{ steps.version.outputs.tag }}"
-          # Tag v1.2.0-beta1 -> manifest version should be 1.2.0 or 1.2.0-beta1
-          CLEAN_TAG="${TAG#v}"
-          echo "manifest version: $VERSION_IN_MANIFEST, tag: $CLEAN_TAG"
-          if [ "$VERSION_IN_MANIFEST" != "$CLEAN_TAG" ]; then
-            echo "::warning::Version in manifest ($VERSION_IN_MANIFEST) differs from tag ($CLEAN_TAG). Updating manifest."
-            python3 -c "import json,sys; p='custom_components/akvilon_home/manifest.json'; d=json.load(open(p)); d['version']='$CLEAN_TAG'; json.dump(d,open(p,'w'),ensure_ascii=False,indent=2)"
-            git config user.name "github-actions"
-            git config user.email "actions@github.com"
-            git add custom_components/akvilon_home/manifest.json
-            git commit -m "release: bump version to $CLEAN_TAG"
-            git push
-          fi
-
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           body: |
-            ## Изменения в релизе ${{ github.ref_name }}
+            ## Релиз ${{ github.ref_name }}
 
-            Смотрите историю коммитов между тегами для полного списка изменений.
+            Интеграция **Akvilon InHome** для Home Assistant.
 
-            ### Канал: ${{ steps.version.outputs.channel }}
-            - Ветка: `${{ steps.version.outputs.channel == 'beta' && 'develop' || 'main' }}`
+            Установка: через HACS → добавьте репозиторий
+            `https://github.com/Gakuzi/akvilon_home_hacs`
+            (тип Integration), выберите ветку/релиз и нажмите **Download**.
           draft: false
-          prerelease: ${{ steps.version.outputs.prerelease }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
           generate_release_notes: true

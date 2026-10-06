@@ -81,7 +81,7 @@ PY
 # 4) Коммит и тег
 git checkout "$BRANCH"
 git add -A
-git commit -m "release: v${TAG}" || echo ">> нечего коммитить"
+git commit -m "release: ${TAG}" || echo ">> нечего коммитить"
 git tag -f "$TAG"
 git push origin "$BRANCH" --tags
 
