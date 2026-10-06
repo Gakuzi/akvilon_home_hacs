@@ -51,10 +51,11 @@ class AkvilonMeterSensor(SensorEntity):
 
     def __init__(self, meter: dict):
         self.meter = meter
-        dn = meter.get("deviceNumber") or meter.get("device_number") or "",
+        dn = _or_val(meter.get("deviceNumber") or meter.get("device_number"))
         name = meter.get("name") or "Счётчик"
-        self._attr_unique_id = f"{DOMAIN}_meter_{or_val(dn)}"
+        self._attr_unique_id = f"{DOMAIN}_meter_{dn}"
         self._label = name
+        self._device_number = dn
 
     @property
     def name(self):
@@ -87,15 +88,16 @@ class AkvilonMeterSensor(SensorEntity):
 
     @property
     def state_class(self):
-        # Счётчики — накопительные показания (total_increasing), т.к. sensor.
-        # Для energy/water HA требует total/total_increasing, не measurement.
+        # Счётчики — накопительные показания (total_increasing).
         return "total_increasing"
 
     @property
     def extra_state_attributes(self):
         attrs = {"integration": "akvilon_home"}
-        if "deviceNumber" in self.meter:
-            attrs["device_number"] = self.meter["deviceNumber"]
+        attrs["device_number"] = self._device_number
+        attrs["resource_type"] = self.meter.get("resourceType")
+        attrs["meter_type"] = self.meter.get("meterType")
+        attrs["object_id"] = self.meter.get("objectid") or self.meter.get("objectId") or ""
         cur = _meter_current(self.meter)
         if isinstance(cur, dict):
             attrs["reading_date"] = cur.get("dt")
@@ -104,8 +106,64 @@ class AkvilonMeterSensor(SensorEntity):
         return attrs
 
 
+class AkvilonMeterTariffSensor(SensorEntity):
+    """Отдельный сенсор тарифа двух-тарифного счётчика (День/Ночь).
+
+    Электричество приходит одним счётчиком с current.values = [T1, T2, T3, T4],
+    где value = сумма тарифов, а T1/T2 — тарифы «День»/«Ночь». Создаём по одному
+    сенсору на тариф с привязкой к тому же device_number.
+    """
+
+    _attr_has_entity_name = False
+    _attr_device_class = "energy"
+    _attr_state_class = "total_increasing"
+
+    def __init__(self, meter: dict, tariff_index: int, tariff_label: str):
+        self.meter = meter
+        self.tariff_index = tariff_index
+        self._label = (meter.get("name") or "Счётчик") + f" ({tariff_label})"
+        dn = _or_val(meter.get("deviceNumber") or meter.get("device_number"))
+        self._device_number = dn
+        self._attr_unique_id = f"{DOMAIN}_meter_{dn}_tariff{tariff_index}"
+        self._tariff_number = tariff_index + 1
+
+    @property
+    def name(self):
+        return f"Счётчик {self._label}"
+
+    @property
+    def icon(self):
+        return "mdi:chart-bell-curve-cumulative"
+
+    @property
+    def native_value(self):
+        cur = _meter_current(self.meter)
+        if isinstance(cur, dict) and isinstance(cur.get("values"), list):
+            vals = cur["values"]
+            if self.tariff_index < len(vals):
+                return vals[self.tariff_index]
+        return None
+
+    @property
+    def native_unit_of_measurement(self):
+        cur = _meter_current(self.meter)
+        if isinstance(cur, dict):
+            return _normalize_unit((cur.get("unit") or "").strip())
+        return None
+
+    @property
+    def extra_state_attributes(self):
+        return {
+            "integration": "akvilon_home",
+            "device_number": self._device_number,
+            "object_id": self.meter.get("objectid") or self.meter.get("objectId") or "",
+            "tariff": f"T{self._tariff_number}",
+            "tariff_index": self.tariff_index,
+        }
+
+
 class AkvilonGateSensor(SensorEntity):
-    """Состояние калитки."""
+    """Состояние калитки (статус контроллера)."""
 
     _attr_has_entity_name = False
 
@@ -125,19 +183,73 @@ class AkvilonGateSensor(SensorEntity):
 
     @property
     def native_value(self):
-        for g in self._hub.gates:
-            gid = str(g.get("objectid") or g.get("objectId") or "")
-            if gid == self.gate_id:
-                st = g.get("currentState", g.get("controllerStatus"))
-                return "open" if st == 1 else ("closed" if st == 0 else "unknown")
+        g = self._hub.gate_by_id(self.gate_id)
+        if g:
+            # Сервер не присылает открыта/закрыта — только статус контроллера
+            st = g.get("controllerStatus")
+            if st is None:
+                return "unknown"
+            return "online" if int(st) else "offline"
         return "unknown"
 
     @property
     def extra_state_attributes(self):
-        return {"integration": "akvilon_home", "gate_id": self.gate_id}
+        g = self._hub.gate_by_id(self.gate_id) or {}
+        cam_id = g.get("cameraId") or ""
+        cam = self._hub.camera_by_id(cam_id) if cam_id else None
+        return {
+            "integration": "akvilon_home",
+            "gate_id": self.gate_id,
+            "controller_status": g.get("controllerStatus"),
+            "enabled": g.get("enabled"),
+            "controller_id": str(g.get("controllerId") or ""),
+            "camera_id": cam_id,
+            "camera_name": str(cam.get("name") or "") if cam else "",
+        }
 
 
-def or_val(val):
+class AkvilonIntercomSensor(SensorEntity):
+    """Домофон: сенсор-состояние с привязкой домофон↔камера↔калитка.
+
+    Сервер не шлёт события вызова как часть списков, поэтому основной смысл
+    сенсора — отдать состояние (статус входа) и связку с камерой для карточек.
+    Кнопка вызова/открытия — в button.py (AkvilonIntercomButton).
+    """
+
+    _attr_has_entity_name = False
+
+    def __init__(self, hub, intercom_id, name):
+        self._hub = hub
+        self.intercom_id = str(intercom_id)
+        self._name = name
+        self._attr_unique_id = f"{DOMAIN}_intercom_{self.intercom_id.replace(':', '_')}"
+
+    @property
+    def name(self):
+        return f"Домофон {self._name}"
+
+    @property
+    def icon(self):
+        return "mdi:doorbell-video"
+
+    @property
+    def native_value(self):
+        g = self._hub.gate_by_id(self.intercom_id)
+        if g:
+            st = g.get("controllerStatus")
+            if st is None:
+                return "unknown"
+            return "online" if int(st) else "offline"
+        return "unknown"
+
+    @property
+    def extra_state_attributes(self):
+        link = self._hub.intercom_link(self.intercom_id)
+        link["integration"] = "akvilon_home"
+        return link
+
+
+def _or_val(val):
     if isinstance(val, tuple):
         val = val[0]
     return val or "unknown"
@@ -151,9 +263,19 @@ async def async_setup_entry(
     sens = []
     for m in hub.meters:
         sens.append(AkvilonMeterSensor(m))
+        # Двух-тарифный счётчик (электричество): значения T1/T2 -> День/Ночь
+        cur = _meter_current(m)
+        vals = cur.get("values") if isinstance(cur, dict) else None
+        if isinstance(vals, list) and len(vals) >= 2:
+            sens.append(AkvilonMeterTariffSensor(m, 0, "День"))
+            sens.append(AkvilonMeterTariffSensor(m, 1, "Ночь"))
     for g in hub.gates:
         gid = str(g.get("objectid") or g.get("objectId") or "")
         if gid:
             sens.append(AkvilonGateSensor(hub, gid, g.get("name") or "Калитка"))
+    for ic in hub.intercoms:
+        iid = str(ic.get("objectid") or ic.get("objectId") or "")
+        if iid:
+            sens.append(AkvilonIntercomSensor(hub, iid, ic.get("name") or "Домофон"))
     async_add_entities(sens, True)
     _LOGGER.info("Аквилон: добавлено %d сенсоров из сервера", len(sens))

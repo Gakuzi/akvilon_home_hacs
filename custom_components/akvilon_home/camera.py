@@ -1,9 +1,11 @@
 """Камеры Аквилон: видео идёт через сервер здания по UDP/RTP с токеном.
 
 Камеры создаются динамически из живого списка сервера (hub.cameras).
-Видео-поток идёт через UDP-RTP на порт сервера с токеном; пока RTP-прокси
-не настроен, камера хранит реальные параметры (host, port, token, object_id)
-в атрибутах.
+Видео-поток идёт UDP-RTP и пока отложен (нет pcap приложения). Поэтому
+camera.py НЕ обращается к серверу при чтении атрибутов — это блокировало
+event loop (Caught blocking call to sleep). Атрибуты берутся ТОЛЬКО из
+уже загруженных списков и из кэша _video_settings (если настройки были
+получены заранее через coordinator.get_camera_settings в executor).
 """
 import logging
 
@@ -11,7 +13,7 @@ from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, DEFAULT_HOST
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,22 +50,32 @@ class AkvilonCamera(Camera):
 
     @property
     def extra_state_attributes(self):
-        host = DEFAULT_HOST
-        side = self._hub.get_camera_settings(self.cam_id)
-        vport = int(side.get("videoPort") or side.get("port") or 0)
-        vhost = side.get("videoHost") or host
-        vtok = side.get("videoToken") or ""
-        sprop = side.get("spropParameter") or ""
-        return {
+        # ВАЖНО: никаких сетевых вызовов здесь. Сервер может вообще не отдавать
+        # cameraSettings (video игнорируется). Берём только кэш и статику.
+        cam = self._hub.camera_by_id(self.cam_id) or {}
+        attrs = {
             "object_id": self.cam_id,
-            "vhost": vhost,
-            "vport": vport,
-            "video_token": vtok,
-            "sprop": sprop,
+            "camera_name": self._name,
             "codec": "H.264",
-            "integration": "akvilon_home",
-            "stream_url": f"rtsp://{vhost}:{vport}/cameras/{self.cam_id.replace(':', '_')}" if vport else "",
+            "integration": DOMAIN,
+            # привязка калитки/домофона (если это камера домофона)
+            "domofon": False,
         }
+        # Если камера привязана к калитке (в списке калиток есть cameraId == этой камеры)
+        for g in self._hub._gates:
+            if str(g.get("cameraId") or "") == str(self.cam_id):
+                attrs["domofon"] = True
+                attrs["gate_id"] = str(g.get("objectid") or g.get("objectId") or "")
+                attrs["gate_name"] = str(g.get("name") or "")
+                break
+        # Настройки потока — ТОЛЬКО из кэша (если уже получены), без сети.
+        side = self._hub._video_settings.get(str(self.cam_id)) or {}
+        if side:
+            attrs["video_token"] = side.get("videoToken", "")
+            attrs["vport"] = side.get("videoPort") or side.get("port") or 0
+            attrs["vhost"] = side.get("videoHost", "")
+            attrs["sprop"] = side.get("spropParameter", "")
+        return attrs
 
     async def stream_source(self):
         # Стандартного RTSP-сервера на здании нет; поток — UDP/RTP с токеном.

@@ -136,7 +136,11 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         for g in gates:
             oid = str(g.get("objectid") or g.get("objectId") or "")
             if oid:
-                devices.append({"id": oid, "name": f"Калитка {g.get('name','')}", "type": "gate"})
+                # калитка с реальной привязкой к камере помечается как домофон
+                cam = str(g.get("cameraId") or "")
+                kind = "intercom" if cam and cam != "0:-1" else "gate"
+                label = "Домофон" if kind == "intercom" else "Калитка"
+                devices.append({"id": oid, "name": f"{label} {g.get('name','')}", "type": kind})
         for m in mets:
             oid = str(m.get("objectid") or m.get("objectId") or "")
             if oid:

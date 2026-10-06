@@ -9,8 +9,7 @@ import time
 from dataclasses import dataclass
 
 from .const import DOMAIN
-import json
-from .protocol import AkvilonClient, CH_CAMERAS, CH_INTERCOM, CH_GATES, CH_METERS
+from .protocol import AkvilonClient, CH_CAMERAS, CH_GATES, CH_METERS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,9 +31,10 @@ class AkvilonHub:
         self._cams = []
         self._gates = []
         self._meters = []
-        self._intercoms = []
+        self._intercoms = []  # домофоны: выводим из калиток, у которых есть cameraId
         self._video_settings = {}  # cam_id -> dict(videoPort, videoHost, videoToken, sprop)
         self._last_ok = 0.0  # monotonic метка последнего успешного опроса сервера
+        self._last_count = 0
         self.selected: list[str] | None = None  # None = все
 
     def _new_client(self) -> AkvilonClient:
@@ -56,12 +56,16 @@ class AkvilonHub:
             return False
 
     def refresh(self):
-        """Получает свежие списки камер/калиток/счётчиков с сервера."""
+        """Получает свежие списки камер/калиток/счётчиков с сервера.
+
+        Домофоны отдельным каналом НЕ существуют (0x10403 пуст — проверено).
+        Домофон = калитка/вход, у которой проставлен cameraId («калитка+камера»).
+        Поэтому после загрузки калиток мы собираем intercoms из _gates.
+        """
         for key, ch in (
             ("cameras", CH_CAMERAS),
             ("gates", CH_GATES),
             ("meters", CH_METERS),
-            ("intercoms", CH_INTERCOM),
         ):
             cl = self._new_client()
             try:
@@ -77,16 +81,19 @@ class AkvilonHub:
                     self._cams = objs
                 elif key == "gates":
                     self._gates = objs
-                elif key == "meters":
-                    self._meters = objs
                 else:
-                    self._intercoms = objs
+                    self._meters = objs
                 self._last_count = cl.last_list_count
             except Exception as exc:  # pragma: no cover
                 _LOGGER.warning("Аквилон: банк %s не получен: %s", key, exc)
             finally:
                 cl._running = False
                 cl.close()
+        # Домофоны = калитки/входы с реальной привязкой к камере (cameraId != 0:-1)
+        self._intercoms = [
+            g for g in self._gates
+            if str(g.get("cameraId") or "").strip() not in ("", "0:-1")
+        ]
         _LOGGER.info(
             "Аквилон: обновлено камер=%d, калиток=%d, счётчиков=%d, домофонов=%d",
             len(self._cams), len(self._gates), len(self._meters), len(self._intercoms),
@@ -113,12 +120,63 @@ class AkvilonHub:
     def intercoms(self) -> list:
         return [i for i in self._intercoms if self._is_selected(str(i.get("objectid") or i.get("objectId") or ""))]
 
+    def gate_by_id(self, gate_id: str):
+        """Находит калитку/вход по objectid (сравнение и по хвосту id)."""
+        for g in self._gates:
+            oid = str(g.get("objectid") or g.get("objectId") or "")
+            if oid == str(gate_id) or oid.split(":")[-1] == str(gate_id).split(":")[-1]:
+                return g
+        return None
+
     def camera_by_id(self, cam_id: str):
         for c in self._cams:
             oid = str(c.get("objectid") or c.get("objectId") or "")
             if oid == str(cam_id) or oid.split(":")[-1] == str(cam_id).split(":")[-1]:
                 return c
         return None
+
+    def intercom_link(self, intercom_id: str) -> dict:
+        """Связывает домофон↔камера↔калитка по objectid.
+
+        Возвращает dict: gate_id, gate_name, camera_id, camera_name, controller_id.
+        Используется сущностями домофонов и карточками (Поток B).
+        """
+        gate = self.gate_by_id(intercom_id) or {}
+        oid = str(gate.get("objectid") or gate.get("objectId") or str(intercom_id))
+        cam_id = str(gate.get("cameraId") or "")
+        cam = self.camera_by_id(cam_id) if cam_id else None
+        return {
+            "gate_id": oid,
+            "gate_name": str(gate.get("name") or "Домофон"),
+            "gate_status": gate.get("controllerStatus"),
+            "gate_enabled": gate.get("enabled"),
+            "camera_id": cam_id,
+            "camera_name": str(cam.get("name") or cam.get("Name") or "") if cam else "",
+            "controller_id": str(gate.get("controllerId") or ""),
+        }
+
+    def open_gate(self, gate_id: str) -> bool:
+        """Открывает калитку/домофон: свежая сессия, без фонового ридера.
+
+        Используется кнопками (button) и сервисом open_gate. Свежий клиент
+        подписывается и регистрируется, после чего шлёт команду открытия.
+        """
+        cl = AkvilonClient(
+            self.host, self.port, self.token,
+            device_id=self.device_id, server_id=self.server_id,
+        )
+        ok = False
+        try:
+            cl.connect()
+            cl.subscribe()
+            cl.register()
+            ok = bool(cl.open_gate(gate_id))
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.warning("Аквилон: не удалось открыть %s: %s", gate_id, exc)
+        finally:
+            cl._running = False
+            cl.close()
+        return ok
 
     def get_camera_settings(self, cam_id: str) -> dict:
         """Запрашивает у сервера cameraSettings для камеры (порт/токен/SPS/PPS).

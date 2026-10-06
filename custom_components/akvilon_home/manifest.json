@@ -3,15 +3,15 @@
   "name": "Аквилон InHome",
   "after_dependencies": [],
   "codeowners": [
-    "@Gakuzi"
+    "@akvilon-community"
   ],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/Gakuzi/akvilon_home_hacs/blob/main/README.md",
+  "documentation": "https://github.com/your-namespace/akvilon_home_hass/blob/main/README.md",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/Gakuzi/akvilon_home_hacs/issues",
+  "issue_tracker": "https://github.com/your-namespace/akvilon_home_hass/issues",
   "requirements": [],
-  "version": "1.1.0",
+  "version": "0.1.0",
   "homeassistant": "2024.1.0",
   "integration_type": "hub",
   "loggers": [

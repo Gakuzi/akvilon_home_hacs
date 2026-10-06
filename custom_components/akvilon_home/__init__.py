@@ -104,8 +104,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.async_add_executor_job(_connect_refresh)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    # Периодическое обновление данных с сервера (камеры/калитки/счётчики)
-    prev = {"cameras": set(), "gates": set(), "meters": set()}
+    # Периодическое обновление данных с сервера (камеры/калитки/счётчики/домофоны)
+    prev = {"cameras": set(), "gates": set(), "meters": set(), "intercoms": set()}
 
     def _known(key, items):
         return set(str(x.get("objectid") or x.get("objectId") or "") for x in items if x.get("objectid") or x.get("objectId"))
@@ -119,6 +119,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "cameras": _known("cameras", hub.cameras),
                     "gates": _known("gates", hub.gates),
                     "meters": _known("meters", hub.meters),
+                    "intercoms": _known("intercoms", hub.intercoms),
                 }
                 discovered = []
                 for kind, ids in new_items.items():
