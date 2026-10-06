@@ -7,7 +7,7 @@
 #
 # Примеры:
 #   ./scripts/release.sh 1.1.0          # стабильный релиз -> тег v1.1.0
-#   ./scripts/release.sh 1.2.0 --beta   # бета -> тег v1.2.0-beta1
+#   ./scripts/release.sh 1.2.0 --beta   # бета -> тег v1.2.0-betaN (автоинкремент)
 #
 # Логика:
 #   - исходники берутся из /home/pi/homeassistant/custom_components/akvilon_home
@@ -15,6 +15,7 @@
 #   - копируются в HACS-структуру (custom_components/akvilon_home/)
 #   - обновляется версия в manifest.json
 #   - коммит + git-тег, пуш в origin (main или develop)
+#   - GitHub Actions по тегу создаёт github-release (HACS увидит обновление)
 # ============================================================
 set -euo pipefail
 
@@ -35,10 +36,22 @@ if [ ! -d "$DEV_SRC" ] || [ ! -d "$DEST" ]; then
   exit 1
 fi
 
-# 1) Определяем целевую ветку
+# 1) Определяем целевую ветку и тег
 if [ "$BETA" = "--beta" ]; then
   BRANCH="develop"
-  TAG="v${VERSION}-beta1"
+  # автоинкремент счётчика бета: v1.2.0-beta1 -> beta2 -> beta3 ...
+  BASE_TAG="v${VERSION}-beta"
+  EXISTS=1
+  N=0
+  while [ "$EXISTS" -eq 1 ]; do
+    N=$((N+1))
+    if git ls-remote --tags origin "${BASE_TAG}${N}" 2>/dev/null | grep -q "refs/tags/${BASE_TAG}${N}"; then
+      EXISTS=1
+    else
+      EXISTS=0
+    fi
+  done
+  TAG="${BASE_TAG}${N}"
 else
   BRANCH="main"
   TAG="v${VERSION}"
@@ -46,6 +59,7 @@ fi
 echo ">> Целевая ветка: $BRANCH, тег: $TAG"
 
 cd "$HACS_ROOT"
+git fetch --all --prune 2>/dev/null || true
 
 # 2) Актуализируем HACS-структуру из dev-исходников
 echo ">> Копирую исходники из $DEV_SRC в HACS-структуру..."
@@ -71,4 +85,7 @@ git commit -m "release: v${TAG}" || echo ">> нечего коммитить"
 git tag -f "$TAG"
 git push origin "$BRANCH" --tags
 
+echo
 echo ">> Готово. Релиз $TAG на ветке $BRANCH опубликован."
+echo ">> GitHub Actions создаст github-release автоматически."
+echo ">> В HACS появится уведомление об обновлении."
