@@ -1,0 +1,12 @@
+---
+open_gate:
+  name: Открыть калитку
+  description: Открыть указанную калитку/дверь по её идентификатору
+  fields:
+    gate_id:
+      name: ID калитки
+      description: Идентификатор калитки (например "1:101908")
+      required: true
+      example: "1:101908"
+      selector:
+        text:

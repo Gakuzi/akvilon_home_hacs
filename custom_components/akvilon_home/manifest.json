@@ -1,0 +1,20 @@
+{
+  "domain": "akvilon_home",
+  "name": "Аквилон InHome",
+  "after_dependencies": [],
+  "codeowners": [
+    "@Gakuzi"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/Gakuzi/akvilon_home_hacs/blob/main/README.md",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/Gakuzi/akvilon_home_hacs/issues",
+  "requirements": [],
+  "version": "1.1.0",
+  "homeassistant": "2024.1.0",
+  "integration_type": "hub",
+  "loggers": [
+    "custom_components.akvilon_home"
+  ]
+}

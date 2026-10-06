@@ -1,0 +1,8 @@
+{
+  "name": "Аквилон InHome",
+  "render_readme": true,
+  "homeassistant": "2024.1.0",
+  "country": "RU",
+  "zip_release": false,
+  "filename": "manifest.json"
+}
