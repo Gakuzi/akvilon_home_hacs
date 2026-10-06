@@ -7,7 +7,7 @@
     0x00..0x07  магия 04 10 01 00 02 00 05 00
     0x08..0x09  subheader 10 00
     0x0a..0x0d  sequence (4 байта LE)
-    0x0e..0x1d  dst A7ID (DeviceId, напр. 34:50957)
+    0x0e..0x1d  dst A7ID (DeviceId, напр. 0:0)
     0x1e..0x2d  src A7ID (реально 0:1 для устройства)
     0x2e..0x35  stateTime (qint64 ms; для GET=0)
     0x36        cmd (1=GET, 2=данные, 3=EVENT)
@@ -74,8 +74,8 @@ def parse_qr(qr: str) -> dict:
     """Разбирает QR-строку подключения Аквилон (формат застройщика).
 
     Поддерживает два разделителя: 'КЛЮЧ=ЗНАЧЕНИЕ' и пары 'КЛЮЧ;ЗНАЧЕНИЕ'
-    (как в реальной строке: CLEVERB;CODE;71825;VERSION;3;DEVICEID;34:50957;
-    PASS;9c5edcb9;UDP;91.122.221.217;19090;SERVERID;7:48390;SUID;fec8df...).
+    (как в реальной строке: CLEVERB;CODE;71825;VERSION;3;DEVICEID;0:0;
+    PASS;PASS_PLACEHOLDER;UDP;127.0.0.1;19090;SERVERID;0:0;SUID;fec8df...).
     Возвращает dict: HOST, PORT, DEVICE_ID, SERVER_ID, PASS (str), SUID, TOKEN(bytes).
     """
     out = {}
@@ -115,7 +115,7 @@ def parse_qr(qr: str) -> dict:
                 out['SERVER_ID'] = sid
             elif left and right.isdigit():
                 out['HOST'], out['PORT'] = left, int(right)
-    out.setdefault('HOST', '91.122.221.217')
+    out.setdefault('HOST', '127.0.0.1')
     out.setdefault('PORT', 19090)
     dev = out.get('DEVICE_ID') or out.get('DEVICEID') or out.get('DEVICE')
     if dev:
@@ -164,7 +164,7 @@ def build_header(cmd, flag, seq, channel, state_number=0, state_time=0,
     """Строит 64-байтовый header пакет.
 
     src_id/dst_id — строки 'flag:id'. По реальному трафику:
-    src='0:1', dst=DeviceId ('34:50957'). Без них сервер не принимает.
+    src='0:1', dst=DeviceId ('0:0'). Без них сервер не принимает.
     """
     hdr = bytearray(64)
     struct.pack_into("<Q", hdr, 0x00, MAGIC)
@@ -212,12 +212,12 @@ def get_list_payload(req_type=1, object_id=-1, flag=0, counter=0):
 class AkvilonClient:
     """UDP-клиент к серверу здания."""
 
-    def __init__(self, host, port, token_hex, device_id="34:50957", server_id="7:48390",
-                 device_flag=119, pass_hex="9c5edcb9"):
+    def __init__(self, host, port, token_hex, device_id="0:0", server_id="0:0",
+                 device_flag=119, pass_hex="PASS_PLACEHOLDER"):
         self.host = host
         self.port = port
-        # Секрет подписи = PASS из QR (напр. 9c5edcb9), а не SUID.
-        # ВАЖНО: в MD5 участвует АСКИ-строка "9c5edcb9", а НЕ hex-байты 0x9C 0x5E 0xDC 0xB9.
+        # Секрет подписи = PASS из QR (напр. PASS_PLACEHOLDER), а не SUID.
+        # ВАЖНО: в MD5 участвует АСКИ-строка "PASS_PLACEHOLDER", а НЕ hex-байты 0x9C 0x5E 0xDC 0xB9.
         # Проверено по трафику: MD5(header[0x2e:0x40]+payload+ASCII(PASS)) — совпадает с приложением.
         self.token = pass_hex.encode("ascii") if pass_hex else b""
         # src для устройства всегда '0:1', dst = DeviceId

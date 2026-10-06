@@ -9,4 +9,3 @@ venv/
 *.egg-info/
 diag_*.py
 .DS_Store
-secrets.local

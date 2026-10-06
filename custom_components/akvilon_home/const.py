@@ -1,7 +1,7 @@
 """Константы интеграции Аквилон InHome.
 
 Реальные данные камер/калиток собраны из работающего приложения в эмуляторе.
-Видео всех камер идёт через сервер здания 91.122.221.217 на разных UDP-портах с токеном.
+Видео всех камер идёт через сервер здания 127.0.0.1 на разных UDP-портах с токеном.
 """
 
 DOMAIN = "akvilon_home"
@@ -16,14 +16,14 @@ CONF_NAME = "name"
 
 # Заголовок по умолчанию для Config Entry
 DEFAULT_NAME = "Аквилон InHome"
-DEFAULT_DEVICE_ID = "34:50957"
-DEFAULT_SERVER_ID = "7:48390"
+DEFAULT_DEVICE_ID = "0:0"
+DEFAULT_SERVER_ID = "0:0"
 
 # Сервер здания (реальный, из строки подключения)
-DEFAULT_HOST = "91.122.221.217"
+DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 19090
-VIDEO_TOKEN = "token_34:50957"  # токен для всех видео-RTP потоков
-SIGN_KEY_HEX = "fec8df007bfd4e368d92a67a152840df"  # SUID building
+VIDEO_TOKEN = "token_placeholder"  # токен для всех видео-RTP потоков
+SIGN_KEY_HEX = "SUID_PLACEHOLDER"  # SUID building
 
 # Каналы протокола (из нативки libInHome)
 CHANNEL_CAMERAS = 0x10401    # список камер
