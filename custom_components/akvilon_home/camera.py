@@ -78,16 +78,19 @@ class AkvilonCamera(Camera):
                 attrs["gate_name"] = str(g.get("name") or "")
                 break
         # Настройки потока — ТОЛЬКО из кэша (если уже получены), без сети.
+        # Секреты (video_token) НЕ попадают в state HA — только факт наличия
+        # потока и параметры приёма (адрес/порт), а также rtp-URL для клиентов.
         side = self._hub._video_settings.get(str(self.cam_id)) or {}
         if side:
-            attrs["video_token"] = side.get("videoToken", "")
+            attrs["stream_configured"] = True
             attrs["vport"] = side.get("videoPort") or side.get("port") or 0
             attrs["vhost"] = side.get("videoHost", "")
-            attrs["sprop"] = side.get("spropParameter", "")
             attrs["rtp_url"] = (
                 f"rtp://{side.get('videoHost', self._hub.host)}:{side.get('videoPort') or 0}"
                 f"/cameras/{str(self.cam_id).replace(':', '_')}"
             )
+        else:
+            attrs["stream_configured"] = False
         return attrs
 
     def _settings(self):

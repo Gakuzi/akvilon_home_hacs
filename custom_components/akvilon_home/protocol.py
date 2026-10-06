@@ -216,8 +216,8 @@ class AkvilonClient:
                  device_flag=119, pass_hex="PASS_PLACEHOLDER"):
         self.host = host
         self.port = port
-        # Секрет подписи = PASS из QR (напр. PASS_PLACEHOLDER), а не SUID.
-        # ВАЖНО: в MD5 участвует АСКИ-строка "PASS_PLACEHOLDER", а НЕ hex-байты 0x9C 0x5E 0xDC 0xB9.
+        # Секрет подписи = PASS из QR (плейсхолдер PASS_PLACEHOLDER), а не SUID.
+        # ВАЖНО: в MD5 участвует АСКИ-строка PASS, а НЕ hex-байты.
         # Проверено по трафику: MD5(header[0x2e:0x40]+payload+ASCII(PASS)) — совпадает с приложением.
         self.token = pass_hex.encode("ascii") if pass_hex else b""
         # src для устройства всегда '0:1', dst = DeviceId
@@ -422,6 +422,9 @@ class AkvilonClient:
                 self._send_ack(h)
                 with self._inbox_lock:
                     self._inbox.append(d)
+                    # Ограничиваем безграничный рост inbox: храним только последние 500.
+                    if len(self._inbox) > 500:
+                        del self._inbox[:len(self._inbox) - 500]
                 ch = struct.unpack_from("<I", h, 0x38)[0]
                 q = self._queues.get(ch)
                 if q is not None:
@@ -622,7 +625,20 @@ class AkvilonClient:
                                      state_number=self._next_seq(),
                                      state_time=int(time.time() * 1000)),
                          (self.host, self.port))
-        cam_id = str(cam_id)
+        wanted = str(cam_id).strip()
+
+        def _match(obj):
+            """Запрошенная камера совпадает с полученной по полю objectid."""
+            if not isinstance(obj, dict):
+                return False
+            oid = obj.get("objectid") or obj.get("objectId")
+            return oid is not None and str(oid).strip() == wanted
+
+        def _settings_dict(obj):
+            if _match(obj) and ("videoPort" in obj or "spropParameter" in obj):
+                return obj
+            return None
+
         # Сначала читаем ОЧЕРЕДЬ канала 0x2030401 (самый надёжный путь), затем
         # — общий inbox как fallback (канал мог попасть в другую очередь).
         deadline = time.time() + 8.0
@@ -632,8 +648,9 @@ class AkvilonClient:
                 pd = d[HEADER_LEN:len(d) - MD5_LEN]
                 if pd.startswith(b'{'):
                     obj = json.loads(pd.decode("utf-8", "replace"))
-                    if isinstance(obj, dict) and ("videoPort" in obj or "spropParameter" in obj):
-                        return obj
+                    res = _settings_dict(obj)
+                    if res:
+                        return res
             except queue.Empty:
                 pass
             except Exception:
@@ -648,8 +665,9 @@ class AkvilonClient:
                         if pd.startswith(b'{'):
                             try:
                                 obj = json.loads(pd.decode("utf-8", "replace"))
-                                if isinstance(obj, dict) and ("videoPort" in obj or "spropParameter" in obj):
-                                    return obj
+                                res = _settings_dict(obj)
+                                if res:
+                                    return res
                             except Exception:
                                 pass
         return None
@@ -681,19 +699,32 @@ class AkvilonClient:
             vtok = settings.get("videoToken") or ""
         except (TypeError, ValueError):
             return settings
-        if rtp_port and self.sock:
+        # Отдельный UDP-сокет для RTP: НЕ пере-бинд рабочего CTRL-сокета,
+        # чтобы не сломать приём/ACK на канале управления.
+        rtp_sock = None
+        if rtp_port:
             try:
-                self.sock.bind(("0.0.0.0", int(rtp_port)))
+                rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                rtp_sock.settimeout(1.0)
+                rtp_sock.bind(("0.0.0.0", int(rtp_port)))
             except OSError:
-                pass
+                rtp_sock = None
         # Лучшая известная гипотеза «подписочного пакета» на видео-порт:
         # сам видео-токен. Полноценный бинарный handshake старта RTP не найден.
         if vport and vtok:
             for form in (vtok.encode("utf-8"), (vtok + "\r\n").encode("utf-8")):
                 try:
-                    self.sock.sendto(form, (vhost, vport))
+                    if rtp_sock:
+                        rtp_sock.sendto(form, (vhost, vport))
+                    elif self.sock:
+                        self.sock.sendto(form, (vhost, vport))
                 except Exception:
                     pass
+        if rtp_sock:
+            try:
+                rtp_sock.close()
+            except Exception:
+                pass
         return settings
 
     def close_camera(self, cam_id="0:-1"):

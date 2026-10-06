@@ -24,8 +24,8 @@ import time
 _LOGGER = logging.getLogger(__name__)
 
 RTP_MAX = 65535
-# H.264 RTP payload type (обычно 96..98; допустим, что кодек 264 -> любой из этих)
-RTP_PT_RANGE = {96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109}
+# H.264 RTP payload type (динамический диапазон 96-127; обычно 96..98)
+RTP_PT_RANGE = frozenset(range(96, 128))
 
 
 def parse_sprop(sprop: str):
@@ -58,10 +58,8 @@ class RtpStream:
         self.sock = None
         self.my_port = 0
         self._bps = parse_sprop(self.sprop)  # SPS/PPS bytes
-        # RTP reorder buffer: seq -> payload
-        self._buf = {}
-        self._first_seq = None
-        self._last_seq = None
+        # Reorder НЕ требуется: практически это локальная сеть, пакеты приходят
+        # по порядку, а потерянные сегменты FU-A просто не соберутся в кадр.
         if bind_port:
             self.bind(bind_port)
 
@@ -131,6 +129,11 @@ class RtpStream:
             return None
         ts = int.from_bytes(d[4:8], "big")
         pt = d[1] & 0x7F
+        # Валидация payload type: принимаем только H.264 из динамического ряда.
+        # Сервер может слать посторонние служебные RTP-пакеты (другие pt) — их
+        # отбрасываем, чтобы они не испортили сборку кадра.
+        if pt not in RTP_PT_RANGE:
+            return None
         marker = bool(d[1] & 0x80)
         return ts, pt, marker, d[12:]
 
