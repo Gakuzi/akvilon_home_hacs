@@ -37,7 +37,7 @@ mkdir -p "$DST"
 
 # Копируем ТОЛЬКО исходники, не трогаем .git внутри dst (не rm -rf DST)
 cp -f "$SRC"/__init__.py "$DST"/ 2>/dev/null || true
-for ext in py json yaml md txt; do
+for ext in py json yaml; do
   cp -f "$SRC"/*.$ext "$DST"/ 2>/dev/null || true
 done
 
