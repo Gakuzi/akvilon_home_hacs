@@ -2,18 +2,6 @@
 # ============================================================
 # sanitize.sh — очистка ПЕРСОНАЛЬНЫХ ДАННЫХ из кода интеграции
 # перед копированием в ПУБЛИЧНЫЙ HACS-репозиторий.
-#
-# ПРИВАТНЫЙ каталог (разработка)  -> /home/pi/homeassistant/custom_components/akvilon_home
-# ПУБЛИЧНЫЙ каталог (публикация)  -> /home/pi/akvilon_home_hacs/custom_components/akvilon_home
-#
-# Использование:
-#   ./sanitize.sh <src_dir> <dst_dir>
-# Пример:
-#   ./sanitize.sh /home/pi/homeassistant/custom_components/akvilon_home \
-#                 /home/pi/akvilon_home_hacs/custom_components/akvilon_home
-#
-# ВАЖНО: этот скрипт не должен содержать реальные секреты; они передаются
-# через файл secrets.local (см. ниже) или переменные окружения.
 # ============================================================
 set -euo pipefail
 
@@ -30,7 +18,6 @@ if [ -f "$SECRETS_FILE" ]; then
   source "$SECRETS_FILE"
 fi
 
-# Значения по умолчанию (если не заданы в secrets.local)
 HOST="${AKVILON_HOST:-91.122.221.217}"
 DEVICE_ID="${AKVILON_DEVICE_ID:-34:50957}"
 SERVER_ID="${AKVILON_SERVER_ID:-7:48390}"
@@ -38,7 +25,6 @@ PASS="${AKVILON_PASS:-9c5edcb9}"
 SUID="${AKVILON_SUID:-fec8df007bfd4e368d92a67a152840df}"
 TOKEN="${AKVILON_TOKEN:-token_34:50957}"
 
-# Плейсхолдеры (безопасные, публичные)
 P_HOST="127.0.0.1"
 P_DEVICE="0:0"
 P_SERVER="0:0"
@@ -48,10 +34,14 @@ P_TOKEN="token_placeholder"
 
 echo ">> Очистка: $SRC -> $DST"
 mkdir -p "$DST"
-rm -rf "$DST"/*
-cp -r "$SRC"/. "$DST/"
 
-# Замены по всем текстовым файлам
+# Копируем ТОЛЬКО исходники, не трогаем .git внутри dst (не rm -rf DST)
+cp -f "$SRC"/__init__.py "$DST"/ 2>/dev/null || true
+for ext in py json yaml md txt; do
+  cp -f "$SRC"/*.$ext "$DST"/ 2>/dev/null || true
+done
+
+# Замены по текстовым файлам
 find "$DST" -type f \( -name "*.py" -o -name "*.json" -o -name "*.yaml" -o -name "*.md" -o -name "*.txt" \) | while read -r f; do
   sed -i \
     -e "s/${HOST}/${P_HOST}/g" \
@@ -63,13 +53,12 @@ find "$DST" -type f \( -name "*.py" -o -name "*.json" -o -name "*.yaml" -o -name
     "$f" 2>/dev/null || true
 done
 
-# Удаляем внутренние служебные файлы, не нужные для публикации
 rm -f "$DST/secrets.local"
 rm -rf "$DST/__pycache__"
-find "$DST" -name "*.pyc" -delete
+find "$DST" -name "*.pyc" -delete 2>/dev/null || true
 
-# Ищем остатки реальных данных (диагностика)
 echo ">> Проверка остатков личных данных:"
-grep -rn "$HOST\|$PASS\|$SUID\|$TOKEN\|$DEVICE_ID\|$SERVER_ID" "$DST" 2>/dev/null || echo "  чистo"
-
-echo ">> Очистка завершена. Готово к публикации."
+grep -rn "$HOST\|$PASS\|$SUID\|$TOKEN\|$DEVICE_ID\|$SERVER_ID" "$DST" 2>/dev/null || echo "  чисто"
+echo ">> Очистка завершена."
+# Рекурсивно удаляем пустые директории (артефакты вроде вложенной akvilon_home)
+find "$DST" -type d -empty -delete 2>/dev/null || true
