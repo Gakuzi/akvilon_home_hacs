@@ -54,9 +54,11 @@ if [ -d "$DEST" ]; then
   mkdir -p /home/pi/akvilon_backups
   cp -r "$DEST" "/home/pi/akvilon_backups/akvilon_home.bak_$(date +%s)"
   echo ">> Создан бэкап текущей версии"
+  # снимаем root-права, чтобы можно было перезаписать
+  chown -R pi:pi "$DEST" 2>/dev/null || true
 fi
 
-rm -rf "$DEST"
+rm -rf "$DEST" 2>/dev/null || true
 mkdir -p "$(dirname "$DEST")"
 cp -r "$SRC" "$DEST"
 echo ">> Файлы установлены в $DEST"
