@@ -7,7 +7,7 @@
     0x00..0x07  магия 04 10 01 00 02 00 05 00
     0x08..0x09  subheader 10 00
     0x0a..0x0d  sequence (4 байта LE)
-    0x0e..0x1d  dst A7ID (DeviceId, напр. 0:0)
+    0x0e..0x1d  dst A7ID (DeviceId, напр. 34:50957)
     0x1e..0x2d  src A7ID (реально 0:1 для устройства)
     0x2e..0x35  stateTime (qint64 ms; для GET=0)
     0x36        cmd (1=GET, 2=данные, 3=EVENT)
@@ -74,8 +74,8 @@ def parse_qr(qr: str) -> dict:
     """Разбирает QR-строку подключения Аквилон (формат застройщика).
 
     Поддерживает два разделителя: 'КЛЮЧ=ЗНАЧЕНИЕ' и пары 'КЛЮЧ;ЗНАЧЕНИЕ'
-    (как в реальной строке: CLEVERB;CODE;71825;VERSION;3;DEVICEID;0:0;
-    PASS;PASS_PLACEHOLDER;UDP;127.0.0.1;19090;SERVERID;0:0;SUID;fec8df...).
+    (как в реальной строке: CLEVERB;CODE;71825;VERSION;3;DEVICEID;34:50957;
+    PASS;9c5edcb9;UDP;91.122.221.217;19090;SERVERID;7:48390;SUID;fec8df...).
     Возвращает dict: HOST, PORT, DEVICE_ID, SERVER_ID, PASS (str), SUID, TOKEN(bytes).
     """
     out = {}
@@ -115,7 +115,7 @@ def parse_qr(qr: str) -> dict:
                 out['SERVER_ID'] = sid
             elif left and right.isdigit():
                 out['HOST'], out['PORT'] = left, int(right)
-    out.setdefault('HOST', '127.0.0.1')
+    out.setdefault('HOST', '91.122.221.217')
     out.setdefault('PORT', 19090)
     dev = out.get('DEVICE_ID') or out.get('DEVICEID') or out.get('DEVICE')
     if dev:
@@ -164,7 +164,7 @@ def build_header(cmd, flag, seq, channel, state_number=0, state_time=0,
     """Строит 64-байтовый header пакет.
 
     src_id/dst_id — строки 'flag:id'. По реальному трафику:
-    src='0:1', dst=DeviceId ('0:0'). Без них сервер не принимает.
+    src='0:1', dst=DeviceId ('34:50957'). Без них сервер не принимает.
     """
     hdr = bytearray(64)
     struct.pack_into("<Q", hdr, 0x00, MAGIC)
@@ -212,12 +212,12 @@ def get_list_payload(req_type=1, object_id=-1, flag=0, counter=0):
 class AkvilonClient:
     """UDP-клиент к серверу здания."""
 
-    def __init__(self, host, port, token_hex, device_id="0:0", server_id="0:0",
-                 device_flag=119, pass_hex="PASS_PLACEHOLDER"):
+    def __init__(self, host, port, token_hex, device_id="34:50957", server_id="7:48390",
+                 device_flag=119, pass_hex="9c5edcb9"):
         self.host = host
         self.port = port
-        # Секрет подписи = PASS из QR (напр. PASS_PLACEHOLDER), а не SUID.
-        # ВАЖНО: в MD5 участвует АСКИ-строка "PASS_PLACEHOLDER", а НЕ hex-байты 0x9C 0x5E 0xDC 0xB9.
+        # Секрет подписи = PASS из QR (напр. 9c5edcb9), а не SUID.
+        # ВАЖНО: в MD5 участвует АСКИ-строка "9c5edcb9", а НЕ hex-байты 0x9C 0x5E 0xDC 0xB9.
         # Проверено по трафику: MD5(header[0x2e:0x40]+payload+ASCII(PASS)) — совпадает с приложением.
         self.token = pass_hex.encode("ascii") if pass_hex else b""
         # src для устройства всегда '0:1', dst = DeviceId
@@ -602,35 +602,43 @@ class AkvilonClient:
         Отправляет openCamera на 0x30401 и ловит JSON c videoPort в ответе
         (приходит на канал 0x2030401). Именно здесь сервер отдаёт реальные
         параметры RTP-потока: videoPort, videoHost, videoToken, spropParameter.
+
+        Проверено чёрным-ящиком (2026-10-06): после openCamera сервер стабильно
+        пушит cameraSettings на канал 0x2030401 (cmd=3 flag=0) с полями:
+        name, objectid, spropParameter(SPS/PPS H.264), videoCodec:"264",
+        videoHost, videoPort, videoToken. Подписка на сам канал 0x2030401 не
+        обязательна (сервер шлёт его и так), но для надёжности подписываемся.
         """
         self.start_reader()
+        q = self._channel_queue(CH_CAMERA_SETTINGS)
+        try:
+            while True:
+                q.get_nowait()
+        except queue.Empty:
+            pass
         payload = json.dumps({"id": str(cam_id), "name": "openCamera"},
                              separators=(",", ":")).encode("utf-8")
         self.sock.sendto(self._build(CMD_EVENT, 0x00, 0x30401, payload,
-                                     state_number=self._next_seq()),
+                                     state_number=self._next_seq(),
+                                     state_time=int(time.time() * 1000)),
                          (self.host, self.port))
-        target = str(cam_id)
-        # Собираем ВСЕ входящие JSON-пакеты после запроса ищем объект с videoPort
-        # (канал может отличаться, поэтому сканируем общий inbox, а не одну очередь)
+        cam_id = str(cam_id)
+        # Сначала читаем ОЧЕРЕДЬ канала 0x2030401 (самый надёжный путь), затем
+        # — общий inbox как fallback (канал мог попасть в другую очередь).
         deadline = time.time() + 8.0
         while time.time() < deadline:
-            pkts = list(self._queues.values())
-            for q in pkts:
-                try:
-                    while True:
-                        d = q.get_nowait()
-                        if len(d) < MIN_PKT:
-                            continue
-                        pd = d[HEADER_LEN:len(d) - MD5_LEN]
-                        if not pd.startswith(b'{'):
-                            continue
-                        obj = json.loads(pd.decode("utf-8", "replace"))
-                        if not isinstance(obj, dict):
-                            continue
-                        if "videoPort" in obj or "spropParameter" in obj:
-                            return obj
-                except Exception:
-                    pass
+            try:
+                d = q.get(timeout=0.2)
+                pd = d[HEADER_LEN:len(d) - MD5_LEN]
+                if pd.startswith(b'{'):
+                    obj = json.loads(pd.decode("utf-8", "replace"))
+                    if isinstance(obj, dict) and ("videoPort" in obj or "spropParameter" in obj):
+                        return obj
+            except queue.Empty:
+                pass
+            except Exception:
+                pass
+            # fallback: сканируем inbox
             if self._inbox:
                 with self._inbox_lock:
                     for d in self._inbox:
@@ -644,8 +652,49 @@ class AkvilonClient:
                                     return obj
                             except Exception:
                                 pass
-            time.sleep(0.2)
         return None
+
+    def start_video_stream(self, cam_id, settings=None, rtp_port=None, timeout=6.0):
+        """Запускает/пытается запустить RTP-поток камеры.
+
+        Возвращает dict с настройками потока (videoHost/videoPort/videoToken/
+        spropParameter) либо None. Сам RTP чёрным-ящиком НЕ стартуется: сервер
+        принимает openCamera и отдаёт cameraSettings, но НЕ начинает слать
+        кадры, пока клиент не пришлёт точный «подписочный» пакет, который ещё
+        не найден (нужен pcap реального приложения при просмотре камеры).
+
+        Здесь реализовано всё, что известно:
+          1. openCamera -> cameraSettings (порт/токен/SPS/PPS);
+          2. лучшая догадка подписочного пакета отправляется на видео-порт
+             (голый videoToken + видео-токен, как в proto реального приложения);
+          3. возвращаем настройки, чтобы вызвавший мог поднять RTP-приёмник.
+
+        Бинд локального RTP-порта (если передан) — чтобы при START потока кадры
+        пришли именно туда, куда мы слушаем.
+        """
+        settings = settings or self.request_camera_settings(cam_id)
+        if not settings:
+            return None
+        try:
+            vhost = settings.get("videoHost") or self.host
+            vport = int(settings.get("videoPort") or settings.get("port") or 0)
+            vtok = settings.get("videoToken") or ""
+        except (TypeError, ValueError):
+            return settings
+        if rtp_port and self.sock:
+            try:
+                self.sock.bind(("0.0.0.0", int(rtp_port)))
+            except OSError:
+                pass
+        # Лучшая известная гипотеза «подписочного пакета» на видео-порт:
+        # сам видео-токен. Полноценный бинарный handshake старта RTP не найден.
+        if vport and vtok:
+            for form in (vtok.encode("utf-8"), (vtok + "\r\n").encode("utf-8")):
+                try:
+                    self.sock.sendto(form, (vhost, vport))
+                except Exception:
+                    pass
+        return settings
 
     def close_camera(self, cam_id="0:-1"):
         payload = json.dumps({"id": str(cam_id), "name": "closeCamera"},
