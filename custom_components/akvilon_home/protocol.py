@@ -99,7 +99,18 @@ def parse_qr(qr: str) -> dict:
                   'PASS', 'UDP', 'JOOAPORT', 'JOOAPIN', 'SERVERID', 'USEJOOA',
                   'SPACE', 'USERDATA', 'USER', 'SUID', 'DEF_UDP', 'CODE='):
             if i + 1 < len(toks):
-                out[up] = toks[i + 1].strip()
+                value = toks[i + 1].strip()
+                out[up] = value
+                # UDP несёт адрес сервера: 'IP' или 'IP:PORT' (после может идти
+                # отдельный токен порта: 'UDP;IP;PORT'). Если это IP — запомним
+                # его как HOST, а следующий числовой токен как PORT.
+                if up in ('UDP', 'DEF_UDP', 'HOST') and value and ':' not in value \
+                        and not value.isdigit() and '.' in value:
+                    out['HOST'] = value
+                    if i + 2 < len(toks) and toks[i + 2].strip().isdigit():
+                        out['PORT'] = int(toks[i + 2].strip())
+                        i += 3
+                        continue
                 i += 2
             else:
                 i += 1
@@ -115,6 +126,14 @@ def parse_qr(qr: str) -> dict:
                 out['SERVER_ID'] = sid
             elif left and right.isdigit():
                 out['HOST'], out['PORT'] = left, int(right)
+    # HOST/PORT могут прийти также в значении ключа с '=' (UDP=IP:PORT)
+    for k in ('UDP', 'DEF_UDP'):
+        v = out.get(k) or ""
+        if ':' in v and not v.startswith('http'):
+            host, _, port = v.partition(':')
+            if _ and host and port.isdigit():
+                out.setdefault('HOST', host)
+                out.setdefault('PORT', int(port))
     out.setdefault('HOST', '127.0.0.1')
     out.setdefault('PORT', 19090)
     dev = out.get('DEVICE_ID') or out.get('DEVICEID') or out.get('DEVICE')

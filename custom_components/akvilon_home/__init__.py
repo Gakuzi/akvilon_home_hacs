@@ -98,14 +98,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Это решает проблему зависания bootstrap при медленном сервере здания.
     async def _setup_after_data():
         try:
-            await hass.async_add_executor_job(hub.refresh)
+            if entry.data.get("demo"):
+                await hass.async_add_executor_job(hub.load_demo_data)
+            else:
+                await hass.async_add_executor_job(hub.refresh)
         except Exception as exc:  # pragma: no cover
             _LOGGER.warning("Аквилон: первичная загрузка данных не удалась: %s", exc)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         # Создаём/обновляем дашборд «Аквилон» после появления сущностей.
         try:
             from .dashboard import ensure_dashboard
-            await hass.async_add_executor_job(ensure_dashboard, hass)
+            await hass.async_add_executor_job(ensure_dashboard, hass, hub)
         except Exception as exc:  # pragma: no cover
             _LOGGER.warning("Аквилон: не удалось настроить дашборд: %s", exc)
 
