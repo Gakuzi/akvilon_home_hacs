@@ -1,7 +1,7 @@
 """Константы интеграции Аквилон InHome.
 
 Реальные данные камер/калиток собраны из работающего приложения в эмуляторе.
-Видео всех камер идёт через сервер здания на разных UDP-портах с токеном.
+Видео всех камер идёт через сервер здания 127.0.0.1 на разных UDP-портах с токеном.
 """
 
 DOMAIN = "akvilon_home"
@@ -19,11 +19,11 @@ DEFAULT_NAME = "Аквилон InHome"
 DEFAULT_DEVICE_ID = "0:0"
 DEFAULT_SERVER_ID = "0:0"
 
-# Сервер здания (плейсхолдер; реальное значение берётся из строки подключения)
+# Сервер здания (реальный, из строки подключения)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 19090
 VIDEO_TOKEN = "token_placeholder"  # токен для всех видео-RTP потоков
-SIGN_KEY_HEX = "0" * 32  # SUID building placeholder
+SIGN_KEY_HEX = "SUID_PLACEHOLDER"  # SUID building
 
 # Каналы протокола (из нативки libInHome)
 CHANNEL_CAMERAS = 0x10401    # список камер
@@ -60,11 +60,11 @@ GATES = [
     ("16", "Калитка 16"),
 ]
 
-# Счётчики/приборы учёта квартиры (обезличенные демо-показания)
+# Счётчики/приборы учёта квартиры 31 (реальные показания из приложения 05.10.2026)
 METERS = [
     {
         "name": "ГВС (горячая вода)",
-        "device_number": "XXXXXXXX",
+        "device_number": "8992064",
         "value": 121.243,
         "unit": "m³",
         "device_class": "water",
@@ -73,7 +73,7 @@ METERS = [
     },
     {
         "name": "Отопление",
-        "device_number": "XXXXXXXX",
+        "device_number": "22059787",
         "value": 12.087,
         "unit": "Gcal",
         "device_class": "energy",
@@ -82,7 +82,7 @@ METERS = [
     },
     {
         "name": "ХВС (холодная вода)",
-        "device_number": "XXXXXXXX",
+        "device_number": "8992049",
         "value": 332.001,
         "unit": "m³",
         "device_class": "water",
@@ -91,7 +91,7 @@ METERS = [
     },
     {
         "name": "Электричество",
-        "device_number": "XXXXXXXX",
+        "device_number": "10748182728594",
         "value": 9984.45,
         "unit": "kWh",
         "values": [7248.99, 2735.46, 0, 0],

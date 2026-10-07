@@ -93,17 +93,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.title, hub.host, hub.port, hub.selected,
     )
 
-    # Подключаемся к серверу и получаем списки ДО создания сущностей
-    def _connect_refresh():
-        hub.connect()
-        for attempt in range(2):
-            hub.refresh()
-            if hub.cameras or hub.meters:
-                break
-            time.sleep(2)
+    # Устанавливаем флаг "setup завершается фоном" — создаём сущности,
+    # как только сервер ответит данными, НЕ блокируя загрузку HA.
+    # Это решает проблему зависания bootstrap при медленном сервере здания.
+    async def _setup_after_data():
+        try:
+            await hass.async_add_executor_job(hub.refresh)
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.warning("Аквилон: первичная загрузка данных не удалась: %s", exc)
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        # Создаём/обновляем дашборд «Аквилон» после появления сущностей.
+        try:
+            from .dashboard import ensure_dashboard
+            await hass.async_add_executor_job(ensure_dashboard, hass)
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.warning("Аквилон: не удалось настроить дашборд: %s", exc)
 
-    await hass.async_add_executor_job(_connect_refresh)
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    hass.loop.create_task(_setup_after_data())
     # Периодическое обновление данных с сервера (камеры/калитки/счётчики/домофоны)
     prev = {"cameras": set(), "gates": set(), "meters": set(), "intercoms": set()}
 
@@ -143,6 +149,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hub = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     if hub is not None:
         await hass.async_add_executor_job(hub.close)
+    # При удалении интеграции удаляем дашборд «Аквилон».
+    try:
+        from .dashboard import remove_dashboard
+        await hass.async_add_executor_job(remove_dashboard, hass)
+    except Exception:  # pragma: no cover
+        pass
     return unload_ok
 
 

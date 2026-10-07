@@ -43,7 +43,7 @@ done
 
 # Замены по текстовым файлам
 find "$DST" -type f \( -name "*.py" -o -name "*.json" -o -name "*.yaml" -o -name "*.md" -o -name "*.txt" \) | while read -r f; do
-  sed -i \
+  sed -i '' \
     -e "s/${HOST}/${P_HOST}/g" \
     -e "s/${TOKEN}/${P_TOKEN}/g" \
     -e "s/${PASS}/${P_PASS}/g" \

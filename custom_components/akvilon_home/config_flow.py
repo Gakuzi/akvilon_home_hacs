@@ -64,10 +64,9 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 params = parse_qr(qr)
                 _LOGGER.info("[akvilon_home][flow] parse_qr -> HOST=%s PORT=%s DEVICE_ID=%s SERVER_ID=%s PASS=%s",
                              params.get("HOST"), params.get("PORT"), params.get("DEVICE_ID"),
-                             params.get("SERVER_ID"), "***" if params.get("PASS") else "")
+                             params.get("SERVER_ID"), params.get("PASS"))
                 if not params.get("HOST") or not params.get("DEVICE_ID") or not params.get("PASS"):
-                    masked = {k: ("***" if k == "PASS" else v) for k, v in params.items()}
-                    _LOGGER.error("[akvilon_home][flow] Недостаточно полей после parse_qr: %s", masked)
+                    _LOGGER.error("[akvilon_home][flow] Недостаточно полей после parse_qr: %s", params)
                     errors["base"] = "invalid_qr"
                 else:
                     self._params = {
