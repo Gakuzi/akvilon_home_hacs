@@ -48,6 +48,7 @@ from .button import AkvilonGateButton
 from .sensor import AkvilonMeterSensor, AkvilonGateSensor
 from .binary_sensor import AkvilonOnlineSensor
 from .coordinator import AkvilonHub
+from .viewer import ViewerServer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,6 +93,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "Аквилон: setup_entry name='%s' host=%s:%s selected=%s",
         entry.title, hub.host, hub.port, hub.selected,
     )
+
+    # ---- сервисы управления веб-панелью камер ----
+    async def _async_start_viewer(call):
+        port = call.data.get("port", 8090)
+        refresh = call.data.get("refresh", 12)
+        v = ViewerServer(hub, port=port, refresh=refresh)
+        v._start()
+        hass.data.setdefault("akvilon_viewers", {})[entry.entry_id] = v
+        _LOGGER.info("Аквилон: веб-панель камер запущена на порту %d", port)
+
+    async def _async_stop_viewer(call):
+        v = hass.data.get("akvilon_viewers", {}).pop(entry.entry_id, None)
+        if v:
+            await hass.async_add_executor_job(v._stop)
+            _LOGGER.info("Аквилон: веб-панель камер остановлена")
+
+    hass.services.async_register(DOMAIN, "start_viewer", _async_start_viewer)
+    hass.services.async_register(DOMAIN, "stop_viewer", _async_stop_viewer)
 
     # Подключаемся к серверу и получаем списки ДО создания сущностей
     def _connect_refresh():
@@ -140,6 +159,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Выгрузить интеграцию (удаляет сущности и закрывает соединение)."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    # остановить веб-панель, если запущена
+    v = hass.data.get("akvilon_viewers", {}).pop(entry.entry_id, None)
+    if v is not None:
+        await hass.async_add_executor_job(v._stop)
     hub = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     if hub is not None:
         await hass.async_add_executor_job(hub.close)
