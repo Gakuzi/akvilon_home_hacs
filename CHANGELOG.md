@@ -2,6 +2,27 @@
 
 Все суммы и статусы указаны в рублях РФ. Версии следуют SemVer.
 
+## v1.7.0-beta1 (2026-10-08)
+
+### Новые функции
+
+- **Живое видео камер** — кадр камеры по запросу через UDP/RTP: `openCamera`
+  → `cameraSettings` (videoPort/videoToken/SPS-PPS) → подписочный пакет
+  `b"\x00\x00"+videoToken` → приём RTP/H.264 → декод в JPEG (ffmpeg).
+  Реализовано `rtp_stream.py` + `hub.camera_frame()`. После захвата камера
+  закрывается (`closeCamera`), чтобы не копить лимит активных сессий на сервере.
+- **Веб-панель камер** (`viewer`) — локальный HTTP-сервер (порт 8090 по
+  умолчанию) со сеткой всех камер, снимками по запросу и живым MJPEG для
+  выбранной. Управляется сервисами `start_viewer` / `stop_viewer`.
+- **Кадр камеры в HA** — `camera.async_camera_image()` теперь возвращает реальный
+  JPEG (запуск RTP в executor, не блокирует event loop).
+
+### Прочее
+
+- Исправлен вызов конструктора камер: в `async_setup_entry` передаётся `hass`.
+- Добавлены юнит-тесты (`tests/`) для protocol, coordinator, rtp_stream, viewer:
+  `./scripts/setup_test_env.sh` + `./scripts/run_tests.sh` (53 теста).
+
 ## v1.6.0 (2026-10-08)
 
 ### Исправления (критический баг настройки)

@@ -4,11 +4,10 @@
 в формате RTP/H.264 (payload type 96/97/98, срочный: FU-A для нарезки NAL).
 Параметры кодека (SPS/PPS) берутся из cameraSettings.spropParameter.
 
-Статус (честно, 2026-10-06): сервер принимает openCamera и отдаёт параметры
-потока, но НЕ стартует RTP без точного «подписочного» пакета, который ещё
-не найден (нужен pcap реального приложения). Этот модуль — ГОТОВЫЙ приёмник:
-как только сервер начнёт слать кадры, он за 1-2 сек соберёт IDR-кадр и отдаст
-JPEG через ffmpeg. Если потока нет — методы вернут None, не блокируя HA.
+Статус (2026-10-08): РАБОТАЕТ. РПР-поток запускается отправкой подписочного
+пакета b"\x00\x00"+videoToken на videoHost:videoPort (см. _kick). Этот модуль
+— приёмник: слушает RTP, за 1-2 сек собирает IDR-кадр и отдаёт JPEG через
+ffmpeg. Если поток не пошёл — методы вернут None, не блокируя HA.
 
 Использование (в executor):
     stream = RtpStream(settings)
@@ -72,14 +71,20 @@ class RtpStream:
         return self.my_port
 
     def _kick(self):
-        """Шлёт токен/лучшую гипотезу подписки на видео-порт (если известен)."""
+        """Запускает RTP: шлёт подписочный пакет на видео-порт.
+
+        Точный формат (из pcap приложения inHome): UDP-датаграмма =
+        b"\\x00\\x00" + ascii(videoToken), отправляемая на videoHost:videoPort.
+        Сервер стримит RTP/H.264 на тот же клиентский UDP-порт, с которого
+        отправлен пакет.
+        """
         if not self.port or not self.token:
             return
-        for form in (self.token.encode(), (self.token + "\r\n").encode()):
-            try:
-                self.sock.sendto(form, (self.host, self.port))
-            except Exception:
-                pass
+        payload = b"\x00\x00" + self.token.encode("ascii")
+        try:
+            self.sock.sendto(payload, (self.host, self.port))
+        except Exception:
+            pass
 
     def _decode_ffmpeg(self, annexb):
         """Декодит annexb H.264 в JPEG через ffmpeg -f h264. Возвращает bytes|None.

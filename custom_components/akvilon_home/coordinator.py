@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from .const import DOMAIN
 from .protocol import AkvilonClient, CH_CAMERAS, CH_GATES, CH_METERS
+from .rtp_stream import RtpStream
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -219,23 +220,31 @@ class AkvilonHub:
             cl.close()
         return ok
 
-    def get_camera_settings(self, cam_id: str) -> dict:
+    def get_camera_settings(self, cam_id: str, force: bool = False) -> dict:
         """Запрашивает у сервера cameraSettings для камеры (порт/токен/SPS/PPS).
 
         Открывает камеру через протокол, ловит ответ cameraSettings на канале
-        0x2030401 и кэширует результат. Видео-порт приходит именно здесь, а не
-        в живом списке камер (там поля videoPort нет).
+        0x2030401 и кэширует результат на ~30 секунд. Видео-порт приходит именно
+        здесь, а не в живом списке камер (там поля videoPort нет).
+
+        ВАЖНО: НЕ вызываем register() — он портит UDP-сессию и сервер отвечает
+        на GET flag=0x82 (ERR). Подпись PASS в openCamera/GET достаточна.
+
+        force=True — принудительно переоткрывает камеру (свежий token), что нужно
+        перед реальным захватом кадра: сервер инвалидирует сессию видео со временем.
         """
         try:
             sid = str(cam_id)
-            if sid in self._video_settings:
-                return self._video_settings[sid]
+            # кэш годен ~30 сек; для захвата кадра (force) всегда переоткрываем
+            if not force and sid in self._video_settings:
+                st = self._video_settings[sid]
+                if time.time() - st.get("_ts", 0) < 30.0:
+                    return st
             cl = self._new_client()
             try:
-                cl.subscribe()
-                cl.register()
                 settings = cl.request_camera_settings(sid)
                 if settings:
+                    settings = {**settings, "_ts": time.time()}
                     self._video_settings[sid] = settings
                 return settings or {}
             finally:
@@ -263,6 +272,46 @@ class AkvilonHub:
         if vport:
             return f"rtsp://{vhost}:{vport}/cameras/{str(cam_id).replace(':', '_')}"
         return ""
+
+    def camera_frame(self, cam_id: str, timeout: float = 7.0) -> bytes | None:
+        """Захватывает реальный кадр камеры (JPEG) через RTP.
+
+        Вызывается ТОЛЬКО из executor (не на event loop): делает сетевые
+        операции и блокирующий декод ffmpeg. Возвращает JPEG-bytes или None.
+
+        Цепочка: openCamera -> cameraSettings (videoPort/videoToken) ->
+        отправить b"\x00\x00"+videoToken на videoPort -> принять RTP/H.264 ->
+        собрать IDR-кадр -> декодить в JPEG через ffmpeg.
+        """
+        try:
+            settings = self.get_camera_settings(cam_id, force=True)
+            if not settings or not settings.get("videoPort"):
+                _LOGGER.debug("Аквилон: нет настроек потока для камеры %s", cam_id)
+                return None
+            stream = RtpStream(settings)
+            try:
+                jpg = stream.grab_jpeg(timeout=timeout)
+            finally:
+                stream.close()
+            # освобождаем видео-сессию на сервере (иначе накопится лимит
+            # активных камер и сервер перестанет отдавать cameraSettings для новых)
+            self._close_camera_session(cam_id)
+            return jpg
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.warning("Аквилон: не удалось захватить кадр камеры %s: %s", cam_id, exc)
+            return None
+
+    def _close_camera_session(self, cam_id: str):
+        """Отправляет closeCamera, чтобы освободить видео-сессию на сервере."""
+        try:
+            cl = self._new_client()
+            try:
+                cl.close_camera(str(cam_id))
+            finally:
+                cl._running = False
+                cl.close()
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.debug("Аквилон: closeCamera %s: %s", cam_id, exc)
 
     def close(self):
         if self.client:

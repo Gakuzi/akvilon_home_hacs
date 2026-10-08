@@ -690,11 +690,27 @@ class AkvilonClient:
             time.sleep(0.2)
         return None
 
+    def send_video_token(self, vhost: str, vport: int, video_token: str):
+        """Запускает RTP-поток камеры: шлёт подписочный пакет на видео-порт.
+
+        Точный формат подписки (восстановлен по pcap приложения inHome):
+        UDP-датаграмма = b"\\x00\\x00" + ascii(videoToken), отправляемая на
+        videoHost:videoPort. После этого сервер стримит RTP/H.264 на тот же
+        клиентский UDP-порт, с которого был отправлен пакет.
+        """
+        payload = b"\x00\x00" + str(video_token).encode("ascii")
+        try:
+            self.sock.sendto(payload, (vhost, int(vport)))
+            return True
+        except Exception as exc:  # pragma: no cover
+            _LOG.debug("[akvilon_home] send_video_token err: %s", exc)
+            return False
+
     def close_camera(self, cam_id="0:-1"):
         payload = json.dumps({"id": str(cam_id), "name": "closeCamera"},
                              separators=(",", ":")).encode("utf-8")
-        return self.send(CMD_EVENT, 0x00, 0x30401, payload, state_number=self._next_seq(),
-                         timeout=6.0)
+        return self.send(CMD_EVENT, 0x00, 0x30401, payload,
+                         state_number=self._next_seq(), timeout=6.0)
 
     def open_gate(self, gate_id) -> bool:
         """Открывает проход/калитку/домофон по реальному трафику приложения.

@@ -10,3 +10,33 @@ open_gate:
       example: "1:101908"
       selector:
         text:
+
+start_viewer:
+  name: Запустить веб-панель камер
+  description: Запустить локальную веб-панель со всеми камерами (сетка, снимки, переключение)
+  fields:
+    port:
+      name: Порт
+      description: HTTP-порт панели (по умолчанию 8090)
+      required: false
+      default: 8090
+      example: 8090
+      selector:
+        number:
+          min: 1024
+          max: 65535
+    refresh:
+      name: Интервал обновления снимков
+      description: Интервал обновления скриншотов видимых камер в секундах
+      required: false
+      default: 12
+      example: 12
+      selector:
+        number:
+          min: 3
+          max: 120
+
+stop_viewer:
+  name: Остановить веб-панель камер
+  description: Остановить запущенную веб-панель камер
+  fields: {}

@@ -10,3 +10,15 @@ venv/
 diag_*.py
 .DS_Store
 secrets.local
+.pytest_cache/
+.coverage
+coverage_html/
+htmlcov/
+
+# Личные рабочие материалы владельца (не являются кодом интеграции)
+.gigatool/
+HA c MAC/
+research-*.md
+
+# Рабочая папка «Ты инженер…» (вложения из Telegram/диагностика)
+2026-10-07 Ты инженер, работающий над интеграцией Akvilon InHome для Home (2)/

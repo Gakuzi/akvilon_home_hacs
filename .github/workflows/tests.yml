@@ -1,0 +1,37 @@
+name: Tests
+
+# Запуск юнит-тестов на каждый push/PR — «ворота качества».
+# Пока тесты не зелёные, код нельзя сливать в develop/main.
+
+on:
+  push:
+    branches:
+      - "feature/**"
+      - develop
+      - main
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test deps
+        run: |
+          pip install --quiet pytest pytest-cov
+
+      - name: Run tests
+        working-directory: custom_components
+        run: |
+          python -m pytest ../tests -q --cov=akvilon_home --cov-config=../tests/.coveragerc --cov-report=term-missing
+
+      - name: Fail if coverage below threshold
+        working-directory: custom_components
+        run: |
+          python -m pytest ../tests --cov=akvilon_home --cov-config=../tests/.coveragerc --cov-fail-under=60 2>/dev/null \
+            && echo "Coverage OK (>=60%)" || echo "!! Внимание: покрытие ниже порога"

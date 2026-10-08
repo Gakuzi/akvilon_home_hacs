@@ -1,11 +1,10 @@
 """Камеры Аквилон: видео идёт через сервер здания по UDP/RTP с токеном.
 
 Камеры создаются динамически из живого списка сервера (hub.cameras).
-Видео-поток идёт UDP-RTP и пока отложен (нет pcap приложения). Поэтому
-camera.py НЕ обращается к серверу при чтении атрибутов — это блокировало
-event loop (Caught blocking call to sleep). Атрибуты берутся ТОЛЬКО из
-уже загруженных списков и из кэша _video_settings (если настройки были
-получены заранее через coordinator.get_camera_settings в executor).
+Видео-поток идёт UDP-RTP. Кадр камеры захватывается через RtpStream в executor
+(метод hub.camera_frame): openCamera -> cameraSettings -> подписочный пакет
+b"\x00\x00"+videoToken -> RTP/H.264 -> JPEG. Атрибуты берутся ТОЛЬКО из кэша
+_video_settings (без блокировки event loop).
 """
 import logging
 
@@ -33,8 +32,9 @@ def _cam_id(cam) -> str:
 class AkvilonCamera(Camera):
     """Камера ЖК Аквилон (видео через UDP-RTP прокси сервера)."""
 
-    def __init__(self, hub, cam_id, name):
+    def __init__(self, hass, hub, cam_id, name):
         super().__init__()
+        self.hass = hass
         self._hub = hub
         self.cam_id = cam_id
         self._name = name
@@ -82,7 +82,12 @@ class AkvilonCamera(Camera):
         return None
 
     async def async_camera_image(self, width=None, height=None):
-        return None
+        """Возвращает реальный JPEG-кадр камеры (запуск RTP в executor)."""
+        hub = self._hub
+        cam_id = self.cam_id
+        return await self.hass.async_add_executor_job(
+            hub.camera_frame, cam_id, 7.0
+        )
 
 
 async def async_setup_entry(
@@ -92,7 +97,7 @@ async def async_setup_entry(
     hub = hass.data[DOMAIN][entry.entry_id]
     cameras = [c for c in hub.cameras if _cam_id(c)]
     entities = [
-        AkvilonCamera(hub, _cam_id(c), _cam_name(c)) for c in cameras
+        AkvilonCamera(hass, hub, _cam_id(c), _cam_name(c)) for c in cameras
     ]
     async_add_entities(entities, True)
     _LOGGER.info("Аквилон: добавлено %d камер из сервера", len(entities))

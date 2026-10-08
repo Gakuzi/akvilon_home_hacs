@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Git pre-commit hook: не даёт закоммитить изменения без прохождения тестов.
+# Установка: git config core.hooksPath .githooks
+#            (или: ln -s ../../.githooks/pre-commit .git/hooks/pre-commit — POSIX)
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Тесты запускаются только если в WSL есть venv. Без него — не блокируем коммит,
+# но предупреждаем (чтобы не парализовать работу до установки pytest).
+if [ -x /tmp/akv_test_venv/bin/python ]; then
+    echo ">> [pre-commit] Запуск юнит-тестов..."
+    if ! (cd "$ROOT" && /tmp/akv_test_venv/bin/python -m pytest tests -q); then
+        echo "!! [pre-commit] Тесты не прошли. Коммит отклонён."
+        exit 1
+    fi
+    echo ">> [pre-commit] Тесты OK."
+else
+    echo "!! [pre-commit] ВАЖНО: юнит-тесты не запущены (нет /tmp/akv_test_venv)."
+    echo "   Установите pytest: ./scripts/setup_test_env.sh"
+fi
+exit 0

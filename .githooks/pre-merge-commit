@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Git pre-merge-commit hook: запрещает merge, если тесты не прошли.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+if [ -x /tmp/akv_test_venv/bin/python ]; then
+    echo ">> [pre-merge] Запуск юнит-тестов..."
+    if ! (cd "$ROOT" && /tmp/akv_test_venv/bin/python -m pytest tests -q); then
+        echo "!! [pre-merge] Тесты не прошли. Слияние заблокировано."
+        exit 1
+    fi
+    echo ">> [pre-merge] Тесты OK."
+fi
+exit 0

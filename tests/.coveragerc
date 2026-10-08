@@ -1,0 +1,27 @@
+# Конфигурация покрытия tests.
+# Покрытие измеряется по сетевым-независимым модулям, которые тестируются
+# голым Python (без homeassistant). HA-платформы (camera/sensor/button/
+# binary_sensor/config_flow/__init__/dashboard) требуют рантайма Home Assistant
+# и вне CI тестируются отдельными (pytest-homeassistant) наборами.
+[run]
+source = akvilon_home
+omit =
+    */akvilon_home/__init__.py
+    */akvilon_home/camera.py
+    */akvilon_home/button.py
+    */akvilon_home/sensor.py
+    */akvilon_home/binary_sensor.py
+    */akvilon_home/config_flow.py
+    */akvilon_home/dashboard.py
+
+[report]
+# Минимальное покрытие по тестируемым модулям
+fail_under = 60
+show_missing = True
+precision = 1
+# Исключаем из-под метрики инфраструктуру и генераторы
+exclude_lines =
+    pragma: no cover
+    except Exception
+    def __repr__
+    if __name__ == .__main__.:
