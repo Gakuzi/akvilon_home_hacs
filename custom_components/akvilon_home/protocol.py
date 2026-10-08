@@ -709,8 +709,8 @@ class AkvilonClient:
     def close_camera(self, cam_id="0:-1"):
         payload = json.dumps({"id": str(cam_id), "name": "closeCamera"},
                              separators=(",", ":")).encode("utf-8")
-        return self.send(CMD_EVENT, 0x00, 0x30401, payload, state_number=self._next_seq(),
-                         timeout=6.0)
+        return self.send(CMD_EVENT, 0x00, 0x30401, payload,
+                         state_number=self._next_seq(), timeout=6.0)
 
     def open_gate(self, gate_id) -> bool:
         """Открывает проход/калитку/домофон по реальному трафику приложения.
