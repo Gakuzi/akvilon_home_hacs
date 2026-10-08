@@ -13,7 +13,7 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-_ONLINE_WINDOW_S = 600  # сервер считается онлайн, если последний опрос был < 10 мин
+_ONLINE_WINDOW_S = 1800  # сервер считается онлайн, если последний опрос был < 30 мин
 
 
 class AkvilonOnlineSensor(BinarySensorEntity):

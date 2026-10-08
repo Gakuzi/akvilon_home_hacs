@@ -115,13 +115,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.loop.create_task(_setup_after_data())
     # Периодическое обновление данных с сервера (камеры/калитки/счётчики/домофоны)
     prev = {"cameras": set(), "gates": set(), "meters": set(), "intercoms": set()}
+    stable = {"cameras": set(), "gates": set(), "meters": set(), "intercoms": set()}
 
     def _known(key, items):
         return set(str(x.get("objectid") or x.get("objectId") or "") for x in items if x.get("objectid") or x.get("objectId"))
 
     async def _periodic():
         while True:
-            await asyncio.sleep(180)
+            # Редкий опрос — только чтобы замечать появление/исчезновение
+            # устройств на сервере. Актуальные значения приходят push-ом,
+            # поэтому часто опрашивать сервер списками не нужно (как на
+            # телефоне: списки грузятся по требованию, события — пушатся).
+            await asyncio.sleep(300)
             try:
                 await hass.async_add_executor_job(hub.refresh)
                 new_items = {
@@ -130,14 +135,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "meters": _known("meters", hub.meters),
                     "intercoms": _known("intercoms", hub.intercoms),
                 }
-                discovered = []
-                for kind, ids in new_items.items():
-                    for oid in ids:
-                        if oid not in prev[kind]:
-                            discovered.append(f"{kind}:{oid}")
-                if discovered:
-                    _LOGGER.info("Аквилон: найдены новые устройства: %s", discovered)
-                    hass.bus.async_fire(f"{DOMAIN}_new_devices", {"entry_id": entry.entry_id, "devices": discovered})
+                # Устройство считаем «новым» только если оно объявляется в двух
+                # опросах подряд (сервер иногда недопередаёт список в одном из
+                # циклов). Собираем кандидатов между опросами.
+                confirmed = set()
+                for kind in new_items:
+                    fresh = new_items[kind] - prev[kind]  # ещё не было у нас
+                    # если элемент был кандидатом и снова свежий — подтверждён
+                    confirmed |= (fresh & stable[kind])
+                    stable[kind] = fresh  # кандидаты текущего цикла
+                if confirmed:
+                    _LOGGER.info("Аквилон: подтверждены новые устройства: %s — перезагружаю платформы", confirmed)
+                    await hass.config_entries.async_reload(entry.entry_id)
+                    return
                 prev.update(new_items)
             except Exception:  # noqa: BLE001
                 pass

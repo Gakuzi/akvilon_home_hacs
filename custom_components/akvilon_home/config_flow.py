@@ -1,9 +1,13 @@
-"""Config flow для интеграции Аквилон InHome.
+"""Config flow для интеграции Аквилон InHome (улучшенный мастер).
 
-Пользователь вводит ОДНУ строку подключения от застройщика (или QR-код).
-Строка автоматически распознаётся (host/port/device_id/server_id/PASS/SUID),
-затем с сервера загружается список устройств (камеры/калитки/датчики),
-пользователь отмечает нужные, и создаётся Config Entry.
+Пошаговый мастер настройки:
+  1) ввод строки подключения (QR) + название;
+  2) выбор ТИПОВ устройств (камеры / калитки / домофоны / счётчики) с иконками;
+  3) выбор конкретных устройств (сгруппированы по типам, с иконками и
+     реальными названиями с сервера, сворачиваются);
+  4) финальные опции: создать дашборд, добавить в «Энергию», тарифы.
+
+Все строки — русские (прописаны в strings.json).
 """
 import logging
 
@@ -34,39 +38,41 @@ QR_SCHEMA = vol.Schema(
     }
 )
 
-# Шаг выбора устройств (после загрузки списка)
-SELECT_SCHEMA = vol.Schema(
-    {
-        vol.Required("devices"): vol.All(list),
-    }
-)
+# Метаданные типов устройств: (название группы, иконка)
+TYPE_META = {
+    "camera": ("Камеры", "mdi:cctv"),
+    "gate": ("Калитки", "mdi:gate"),
+    "intercom": ("Домофоны", "mdi:phone-in-talk"),
+    "meter": ("Счётчики", "mdi:counter"),
+}
+TYPE_ORDER = ["camera", "gate", "intercom", "meter"]
 
 
 class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     """Обработчик конфигурации интеграции Аквилон InHome."""
 
-    VERSION = 1
+    VERSION = 2
     MINOR_VERSION = 1
 
     def __init__(self) -> None:
         self._params = {}
         self._devices = []
+        self._cur_selected = []
+        self._entry_title = None
 
+    # ------------------------------------------------------------------
+    # Шаг 1: ввод ключа
+    # ------------------------------------------------------------------
     async def async_step_user(self, user_input: dict | None = None) -> FlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             qr = (user_input.get("connection_string") or "").strip()
-            _LOGGER.info("[akvilon_home][flow] step_user: введена строка len=%d, name=%s",
-                         len(qr), user_input.get(CONF_NAME))
             if not qr:
                 errors["base"] = "invalid_qr"
             else:
                 params = parse_qr(qr)
-                _LOGGER.info("[akvilon_home][flow] parse_qr -> HOST=%s PORT=%s DEVICE_ID=%s SERVER_ID=%s PASS=%s",
-                             params.get("HOST"), params.get("PORT"), params.get("DEVICE_ID"),
-                             params.get("SERVER_ID"), params.get("PASS"))
                 if not params.get("HOST") or not params.get("DEVICE_ID") or not params.get("PASS"):
-                    _LOGGER.error("[akvilon_home][flow] Недостаточно полей после parse_qr: %s", params)
+                    _LOGGER.error("[akvilon_home][flow] Недостаточно полей: %s", params)
                     errors["base"] = "invalid_qr"
                 else:
                     self._params = {
@@ -74,53 +80,200 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_PORT: int(params.get("PORT", 19090)),
                         CONF_TOKEN: params.get("SUID", ""),
                         CONF_DEVICE_ID: params["DEVICE_ID"],
-                        CONF_SERVER_ID: params.get("SERVER_ID", params.get("SERVERFLAG", "") + ":" + params.get("SERVERID_NUM", "")),
+                        CONF_SERVER_ID: params.get(
+                            "SERVER_ID", params.get("SERVERFLAG", "") + ":" + params.get("SERVERID_NUM", "")
+                        ),
                         CONF_NAME: user_input.get(CONF_NAME) or DEFAULT_NAME,
                         "_PASS": params.get("PASS", ""),
                     }
-                    _LOGGER.info("[akvilon_home][flow] self._params = %s", {k: v for k, v in self._params.items() if k != "_PASS"})
-                    # Пробуем подключиться и загрузить список устройств
+                    # Подключение к серверу и загрузка списков устройств
                     try:
                         devices = await self._load_devices()
-                        _LOGGER.info("[akvilon_home][flow] загружено устройств: %d", len(devices))
                         if devices:
                             self._devices = devices
-                            return await self.async_step_select()
+                            return await self.async_step_select_types()
                         errors["base"] = "no_devices"
                     except Exception as exc:  # pragma: no cover
-                        import traceback
-                        _LOGGER.error("[akvilon_home][flow] ошибка загрузки устройств:\n%s", traceback.format_exc())
+                        _LOGGER.error("[akvilon_home][flow] ошибка загрузки: %s", exc)
                         errors["base"] = "cannot_connect"
 
         return self.async_show_form(
             step_id="user",
             data_schema=QR_SCHEMA,
             errors=errors,
-            description_placeholders={"note": "Вставьте строку подключения или отсканируйте QR-code от застройщика."},
+            description_placeholders={
+                "note": "Вставьте строку подключения от застройщика или QR-код."
+            },
         )
 
+    # ------------------------------------------------------------------
+    # Шаг 2: выбор типов устройств (с иконками)
+    # ------------------------------------------------------------------
+    async def async_step_select_types(self, user_input: dict | None = None) -> FlowResult:
+        errors: dict[str, str] = {}
+        type_count: dict[str, int] = {}
+        for d in self._devices:
+            type_count[d["type"]] = type_count.get(d["type"], 0) + 1
+        default_types = [t for t in TYPE_ORDER if type_count.get(t, 0) > 0]
+
+        if user_input is not None:
+            chosen = user_input.get("types") or []
+            chosen_set = set(chosen)
+            self._devices = [d for d in self._devices if d["type"] in chosen_set]
+            if self._devices:
+                return await self.async_step_select()
+            errors["base"] = "no_selection"
+
+        from homeassistant.helpers import selector
+
+        options = []
+        for t in TYPE_ORDER:
+            if type_count.get(t, 0) > 0:
+                group_name, icon = TYPE_META.get(t, (t, "mdi:view-grid"))
+                options.append(
+                    {
+                        "value": t,
+                        "label": f"{group_name} · {type_count[t]}",
+                        "icon": icon,
+                    }
+                )
+        schema = vol.Schema(
+            {
+                vol.Optional("types", default=default_types): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=options, multiple=True, custom_value=False, mode="list"
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="select_types",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"total": str(len(self._devices))},
+        )
+
+    # ------------------------------------------------------------------
+    # Шаг 3: выбор конкретных устройств (группы + иконки + читаемые имена)
+    # ------------------------------------------------------------------
+    async def async_step_select(self, user_input: dict | None = None) -> FlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            selected = user_input.get("devices") or []
+            if self._devices:
+                self._cur_selected = selected
+                data = dict(self._params)
+                data["selected"] = selected
+                self._entry_title = data.get(CONF_NAME) or DEFAULT_NAME
+                return await self.async_step_finish()
+            errors["base"] = "no_selection"
+
+        from homeassistant.helpers import selector
+
+        option_list = []
+        for dev in sorted(
+            self._devices,
+            key=lambda d: (TYPE_ORDER.index(d["type"]) if d["type"] in TYPE_ORDER else 9,
+                           (dev_name(d).lower(),)),
+        ):
+            group_name, icon = TYPE_META.get(dev["type"], (dev["type"], "mdi:view-grid"))
+            option_list.append(
+                {
+                    "value": dev["id"],
+                    "label": dev_name(dev),
+                    "icon": icon,
+                    "group": group_name,
+                }
+            )
+        default_sel = [d["id"] for d in self._devices]
+        schema = vol.Schema(
+            {
+                vol.Optional("devices", default=default_sel): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=option_list, multiple=True, custom_value=False, mode="list"
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="select",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"count": str(len(self._devices))},
+        )
+
+    # ------------------------------------------------------------------
+    # Шаг 4: финальные опции (дашборд / энергия / тарифы)
+    # ------------------------------------------------------------------
+    async def async_step_finish(self, user_input: dict | None = None) -> FlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            data = dict(self._params)
+            data["selected"] = self._cur_selected
+            data["create_dashboard"] = user_input.get("create_dashboard", False)
+            data["add_to_energy"] = user_input.get("add_to_energy", False)
+            data["electricity_tariff_day"] = user_input.get("electricity_tariff_day")
+            data["electricity_tariff_night"] = user_input.get("electricity_tariff_night")
+            data["cold_water_tariff"] = user_input.get("cold_water_tariff")
+            data["hot_water_tariff"] = user_input.get("hot_water_tariff")
+            title = self._entry_title or data.get(CONF_NAME) or DEFAULT_NAME
+            return self.async_create_entry(title=title, data=data)
+
+        schema = vol.Schema(
+            {
+                vol.Optional("create_dashboard", default=True): bool,
+                vol.Optional("add_to_energy", default=True): bool,
+                vol.Optional("electricity_tariff_day", default=8.67): vol.All(
+                    vol.Coerce(float), vol.Range(min=0)
+                ),
+                vol.Optional("electricity_tariff_night", default=3.91): vol.All(
+                    vol.Coerce(float), vol.Range(min=0)
+                ),
+                vol.Optional("cold_water_tariff", default=0.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0)
+                ),
+                vol.Optional("hot_water_tariff", default=0.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0)
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="finish",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={
+                "note": "Настройте дополнительные возможности."
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Загрузка списков устройств с сервера
+    # ------------------------------------------------------------------
     def _build_client(self):
         from .protocol import AkvilonClient
+
         return AkvilonClient(
             self._params[CONF_HOST], self._params[CONF_PORT],
-            self._params.get("_PASS", ""),  # cекрет подписи = PASS
+            self._params.get("_PASS", ""),
             device_id=self._params[CONF_DEVICE_ID],
             server_id=self._params[CONF_SERVER_ID],
         )
 
     def _load_devices_sync(self):
         from .protocol import CH_CAMERAS, CH_GATES, CH_METERS
+
         cl = self._build_client()
         cl.connect()
-        th = cl.start_reader()
+        cl.start_reader()
         try:
             cl.subscribe()
             cl.register()
             import time
+
             time.sleep(0.5)
-            cams = cl.get_list(CH_CAMERAS, timeout=80)
-            gates = cl.get_list(CH_GATES, timeout=40)
-            mets = cl.get_list(CH_METERS, timeout=40)
+            cams = cl.get_list(CH_CAMERAS, timeout=25, sessions=3, batch=9)
+            gates = cl.get_list(CH_GATES, timeout=15, sessions=2, batch=8)
+            mets = cl.get_list(CH_METERS, timeout=15, sessions=2, batch=8)
         finally:
             cl._running = False
             cl.close()
@@ -132,59 +285,56 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         for c in cams:
             oid = str(c.get("objectid") or c.get("objectId") or "")
             if oid:
-                devices.append({"id": oid, "name": f"Камера {c.get('name','')}", "type": "camera"})
+                devices.append(
+                    {"id": oid, "name": clean_name(c, "Камера", oid), "type": "camera"}
+                )
         for g in gates:
             oid = str(g.get("objectid") or g.get("objectId") or "")
             if oid:
-                # калитка с реальной привязкой к камере помечается как домофон
                 cam = str(g.get("cameraId") or "")
                 kind = "intercom" if cam and cam != "0:-1" else "gate"
                 label = "Домофон" if kind == "intercom" else "Калитка"
-                devices.append({"id": oid, "name": f"{label} {g.get('name','')}", "type": kind})
+                devices.append(
+                    {"id": oid, "name": clean_name(g, label, oid), "type": kind}
+                )
         for m in mets:
             oid = str(m.get("objectid") or m.get("objectId") or "")
             if oid:
-                devices.append({"id": oid, "name": f"Счётчик {m.get('name','')}", "type": "meter"})
+                devices.append(
+                    {"id": oid, "name": clean_name(m, "Счётчик", oid), "type": "meter"}
+                )
         return devices
 
-    async def async_step_select(self, user_input: dict | None = None) -> FlowResult:
-        errors: dict[str, str] = {}
-        if user_input is not None:
-            selected = user_input.get("devices") or []
-            if self._devices:
-                data = dict(self._params)
-                data["selected"] = selected
-                title = data.get(CONF_NAME) or DEFAULT_NAME
-                return self.async_create_entry(title=title, data=data)
-            errors["base"] = "no_selection"
-
-        # Мультивыбор устройств через HA SelectSelector (множественный выбор).
-        # Проверено: именно через этот шаг пользователь успешно создавал entry.
-        from homeassistant.helpers import selector
-        options = {d["id"]: f"{d['name']} ({d['type']})" for d in self._devices}
-        default_sel = list(options.keys())
-        schema = vol.Schema({
-            vol.Optional("devices", default=default_sel): selector.SelectSelector(
-                selector.SelectSelectorConfig(options=default_sel, multiple=True)
-            ),
-        })
-        return self.async_show_form(
-            step_id="select",
-            data_schema=schema,
-            errors=errors,
-            description_placeholders={"count": str(len(self._devices))},
-        )
-
+    # ------------------------------------------------------------------
+    # Перенастройка существующего подключения
+    # ------------------------------------------------------------------
     async def async_step_reconfigure(self, user_input: dict | None = None) -> FlowResult:
         entry = self._get_reconfigure_entry()
         current = entry.data if entry else {}
-        qr = current.get("connection_string") or ""
         schema = vol.Schema(
             {
-                vol.Required("connection_string", default=qr): str,
+                vol.Required("connection_string", default=current.get("connection_string", "")): str,
                 vol.Optional(CONF_NAME, default=entry.title if entry else DEFAULT_NAME): str,
             }
         )
         if user_input is not None:
             return await self.async_step_user(user_input)
         return self.async_show_form(step_id="reconfigure", data_schema=schema)
+
+
+def clean_name(obj: dict, fallback_label: str, oid: str) -> str:
+    """Возвращает чистое читаемое название устройства с сервера.
+
+    Убирает лишние пробелы и дубли подписи типа; если названия нет — простой
+    формат: '<Подпись> <oid>'.
+    """
+    raw = str(obj.get("name") or obj.get("Name") or "").strip()
+    raw = " ".join(raw.split())  # схлопываем повторные пробелы
+    if raw:
+        return raw
+    return f"{fallback_label} {oid}"
+
+
+def dev_name(dev: dict) -> str:
+    """Имя устройства для отображения в списке выбора."""
+    return dev.get("name") or dev["id"]

@@ -547,7 +547,7 @@ class AkvilonClient:
                 return None
         return None
 
-    def get_list(self, channel, timeout=30.0, sessions=6) -> list:
+    def get_list(self, channel, timeout=30.0, sessions=6, batch=9) -> list:
         """GET-ALL списка по каналу. Возвращает список JSON-объектов.
 
         Сервер объявляет в бинарном заголовке полный count (напр. 69 камер),
@@ -588,16 +588,40 @@ class AkvilonClient:
                 if attempt < sessions - 1:
                     self._new_session()
                 continue
-            for i, (oid, rflag) in enumerate(missing):
-                obj = self._fetch_one(channel, oid, rflag, i + 1)
-                if obj and isinstance(obj, dict):
-                    oid_s = _safe_str(obj.get("objectid") or obj.get("objectId") or _safe_str(oid))
-                    if oid_s and oid_s not in seen:
-                        seen[oid_s] = obj
-                        order.append(oid_s)
-                # маленькая пауза между поштучными запросами (проверено: так
-                # сервер отдаёт почти все тела; без паузы теряет часть)
-                time.sleep(0.4)
+            # Пакетный сбор: шлём id группами по batch штук подряд и собираем
+            # JSON-тела. Сервер отвечает на первые ~9-18 быстро, поэтому пачек
+            # на 69 камер хватает без поштучной задержки (0.4с на камеру).
+            q = self._channel_queue(channel)
+            missing = [(o, f) for (o, f) in known_ids if _safe_str(o) not in seen]
+            for i in range(0, len(missing), batch):
+                chunk = missing[i:i + batch]
+                for idx, (oid, rflag) in enumerate(chunk):
+                    self.sock.sendto(self._build(CMD_GET, 0x00, channel,
+                                                 get_list_payload(2, oid, rflag, i + idx + 1)),
+                                     (self.host, self.port))
+                # короткая пауза между пачками, чтобы сервер успел отдать волну
+                time.sleep(0.05)
+                need = len(chunk)
+                dead = time.time() + 1.2
+                while time.time() < dead and len(seen) < declared_max:
+                    try:
+                        d = q.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
+                    if len(d) < MIN_PKT:
+                        continue
+                    p = d[HEADER_LEN:len(d) - MD5_LEN]
+                    if not (p.startswith(b'{') or p.startswith(b'[')):
+                        continue
+                    try:
+                        o = json.loads(p.decode("utf-8", "replace"))
+                    except Exception:
+                        continue
+                    if isinstance(o, dict) and o.get("objectid"):
+                        oid_s = _safe_str(o.get("objectid") or o.get("objectId"))
+                        if oid_s and oid_s not in seen:
+                            seen[oid_s] = o
+                            order.append(oid_s)
             if declared_max and len(seen) >= declared_max:
                 break
             if known_ids and all(_safe_str(o) in seen for o, _ in known_ids):
