@@ -1,4 +1,4 @@
-﻿"""Кнопки открытия калиток/дверей и вызова домофонов Аквилон."""
+"""Кнопки открытия калиток/дверей и вызова домофонов Аквилон."""
 import logging
 
 from homeassistant.components.button import ButtonEntity
