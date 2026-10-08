@@ -1,4 +1,4 @@
-"""Реализация UDP-протокола Аквилон InHome (клиент).
+﻿"""Реализация UDP-протокола Аквилон InHome (клиент).
 
 Формат пакета (из реального трафика приложения):
     header(64 байта) + payload + MD5(header[0x2e:0x40] + payload + token)
@@ -376,7 +376,7 @@ class AkvilonClient:
         return self.send(CMD_EVENT, 0x01, 0x200, payload)
 
 
-    def register(self, device_uuid="2::bc6c9020029043179521d917c05504fc"):
+    def register(self, device_uuid="2::device_uuid_placeholder"):
         """Регистрация приложения на сервере (канал 0x02020001).
 
         Без неё сервер молча игнорирует GET-запросы списков.

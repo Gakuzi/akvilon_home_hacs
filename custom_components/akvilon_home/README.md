@@ -1,4 +1,4 @@
-# Akvilon InHome — Home Assistant integration
+﻿# Akvilon InHome — Home Assistant integration
 
 Интеграция Аквилон InHome для Home Assistant (Raspberry Pi, хост `klim`).
 UDP-протокол к серверу здания `127.0.0.1:19090`.
