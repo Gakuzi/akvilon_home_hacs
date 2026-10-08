@@ -40,9 +40,13 @@ class AkvilonHub:
         self.selected: list[str] | None = None  # None = все
 
     def _new_client(self) -> AkvilonClient:
+        # self.token здесь = секрет подписи PASS (из QR, поле _PASS). Передаём
+        # его как pass_hex, иначе AkvilonClient возьмёт дефолт (PASS_PLACEHOLDER)
+        # и сервер отклонит все GET (flag=0x82) — камеры не придут.
         cl = AkvilonClient(
             self.host, self.port, self.token,
             device_id=self.device_id, server_id=self.server_id,
+            pass_hex=self.token,
         )
         cl.connect()
         cl.start_reader()
@@ -111,8 +115,9 @@ class AkvilonHub:
         ):
             cl = self._new_client()
             try:
-                cl.subscribe()
-                cl.register()
+                # ВАЖНО: НЕ вызываем subscribe()/register() для получения списков.
+                # register() портит UDP-сессию: сервер начинает отвечать flag=0x82 (ERR)
+                # на GET, и камеры не приходят. Подписи PASS в пакетах достаточно.
                 self._last_ok = time.monotonic()
                 time.sleep(0.5)
                 # Камеры вытягиваются поштучно с паузой (см. protocol.get_list),
@@ -206,6 +211,7 @@ class AkvilonHub:
         cl = AkvilonClient(
             self.host, self.port, self.token,
             device_id=self.device_id, server_id=self.server_id,
+            pass_hex=self.token,
         )
         ok = False
         try:

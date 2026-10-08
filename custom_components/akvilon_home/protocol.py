@@ -636,7 +636,10 @@ class AkvilonClient:
         """Открыть камеру: cmd=3 flag=0 на 0x30401, {"id":"...","name":"openCamera"}."""
         payload = json.dumps({"id": str(cam_id), "name": "openCamera"},
                              separators=(",", ":")).encode("utf-8")
-        return self.send(CMD_EVENT, 0x00, 0x30401, payload, state_number=self._next_seq(),
+        # state_time обязателен: без него сервер отвечает на openCamera только пустым
+        # ACK и НЕ присылает cameraSettings с videoPort/videoToken.
+        return self.send(CMD_EVENT, 0x00, 0x30401, payload,
+                         state_number=self._next_seq(), state_time=int(time.time() * 1000),
                          timeout=6.0)
 
     def request_camera_settings(self, cam_id):
@@ -650,7 +653,8 @@ class AkvilonClient:
         payload = json.dumps({"id": str(cam_id), "name": "openCamera"},
                              separators=(",", ":")).encode("utf-8")
         self.sock.sendto(self._build(CMD_EVENT, 0x00, 0x30401, payload,
-                                     state_number=self._next_seq()),
+                                     state_number=self._next_seq(),
+                                     state_time=int(time.time() * 1000)),
                          (self.host, self.port))
         target = str(cam_id)
         # Собираем ВСЕ входящие JSON-пакеты после запроса ищем объект с videoPort
