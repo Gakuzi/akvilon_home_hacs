@@ -177,6 +177,30 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await async_setup_entry(hass, entry)
 
 
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Миграция конфигурации со старой версии (1) на новую (2).
+
+    v1 -> v2: добавлены поля create_dashboard/add_to_energy и тарифы.
+    Если поля отсутствуют — подставляем значения по умолчанию.
+    """
+    version = entry.version
+    _LOGGER.info("Аквилон: миграция entry %s с версии %s на %s",
+                 getattr(entry, "entry_id", "?"), version, 2)
+    new_data = dict(getattr(entry, "data", {}) or {})
+    new_data.setdefault("create_dashboard", True)
+    new_data.setdefault("add_to_energy", True)
+    new_data.setdefault("electricity_tariff_day", 8.67)
+    new_data.setdefault("electricity_tariff_night", 3.91)
+    new_data.setdefault("cold_water_tariff", 0.0)
+    new_data.setdefault("hot_water_tariff", 0.0)
+    entry.data = new_data
+    entry.version = 2
+    entry.minor_version = 1
+    return True
+
+
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Очистка данных при удалении интеграции."""
     _LOGGER.info("Аквилон: удаление интеграции %s", entry.entry_id)
