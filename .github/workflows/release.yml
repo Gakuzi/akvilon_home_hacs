@@ -1,8 +1,8 @@
 name: Release
 
 # Публикация релиза в HACS при пуше git-тега.
-# Тег вида: v1.1.0 (stable) или v1.2.0-beta1 (beta).
-# HACS подхватит релиз по тегу и покажет уведомление об обновлении.
+# Описание релиза берётся из CHANGELOG.md — там русские, структурированные
+# заметки о том, что изменилось в каждой версии.
 
 on:
   push:
@@ -34,19 +34,34 @@ jobs:
           test -f hacs.json || { echo "hacs.json missing"; exit 1; }
           test -f custom_components/akvilon_home/manifest.json || { echo "manifest missing"; exit 1; }
 
+      - name: Build release body from CHANGELOG
+        id: body
+        run: |
+          # Берём заголовок релиза и его секцию из CHANGELOG.md
+          TAG="${GITHUB_REF#refs/tags/}"
+          BODY=$(python3 - "$TAG" <<'PY'
+          import re, sys
+          tag = sys.argv[1]
+          try:
+              text = open("CHANGELOG.md").read()
+          except Exception:
+              text = ""
+          # Ищем секцию "## <tag> (" ... до следующей "## "
+          m = re.search(r"^## " + re.escape(tag) + r" \(.*?\)(.*?)(?=^## |\Z)", text, re.S | re.M)
+          section = m.group(1).strip() if m else ""
+          intro = "## Релиз " + tag + "\n\nИнтеграция Akvilon InHome для Home Assistant.\nУстановка: HACS → добавить репозиторий https://github.com/Gakuzi/akvilon_home_hacs (тип Integration) → Download.\n\n## Что изменилось\n\n"
+          print(intro + section if section else intro + "Нет описания в CHANGELOG.")
+          PY
+          )
+          # Сохраняем в файл подменяя $ (чтобы не интерпретировалось github)
+          printf '%s' "$BODY" > body.txt
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          body: |
-            ## Релиз ${{ github.ref_name }}
-
-            Интеграция **Akvilon InHome** для Home Assistant.
-
-            Установка: через HACS → добавьте репозиторий
-            `https://github.com/Gakuzi/akvilon_home_hacs`
-            (тип Integration), выберите ветку/релиз и нажмите **Download**.
+          body_path: body.txt
           draft: false
           prerelease: ${{ steps.meta.outputs.prerelease }}
-          generate_release_notes: true
+          generate_release_notes: false
