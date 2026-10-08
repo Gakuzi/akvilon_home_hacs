@@ -201,6 +201,9 @@ class ViewerServer:
         self.thread = None
         self.cache = {}
         self.lock = threading.Lock()
+        # глобальная сериализация захватов: сервер ограничивает частые openCamera,
+        # поэтому одновременно открывается только одна камера
+        self.grab_lock = threading.Lock()
 
     # ---- классификация камер ----
     def _classify(self):
@@ -247,20 +250,30 @@ class ViewerServer:
         return items
 
     def _cam_frame(self, cam_id, timeout=8.0):
-        """Захват кадра через hub.camera_frame (executor). Кэш ~3 сек."""
+        """Захват кадра через hub.camera_frame (executor). Кэш ~8 сек + сериализация.
+
+        Сервер здания ограничивает слишком частые openCamera (rate-limit), поэтому
+        одновременные захваты разных камер сериализуются глобальной блокировкой.
+        """
         now = time.time()
         cache = self.cache.get(cam_id)
-        if cache and cache.get() and now - cache.ts < SNAPSHOT_CACHE_SEC:
+        if cache and cache.get() and now - cache.ts < 8.0:
             return cache.get()
-        jpg = self.hub.camera_frame(cam_id, timeout=timeout)
-        if jpg and len(jpg) > THUMB_MIN_BYTES:
-            if cache is None:
-                cache = FrameCache()
-                with self.lock:
-                    self.cache[cam_id] = cache
-            cache.put(jpg)
-            return jpg
-        return cache.get() if cache else None
+        with self.grab_lock:
+            # повторная проверка после ожидания блокировки
+            now = time.time()
+            cache = self.cache.get(cam_id)
+            if cache and cache.get() and now - cache.ts < 8.0:
+                return cache.get()
+            jpg = self.hub.camera_frame(cam_id, timeout=timeout)
+            if jpg and len(jpg) > THUMB_MIN_BYTES:
+                if cache is None:
+                    cache = FrameCache()
+                    with self.lock:
+                        self.cache[cam_id] = cache
+                cache.put(jpg)
+                return jpg
+            return cache.get() if cache else None
 
     def _start(self):
         self.httpd = ThreadingHTTPServer(("0.0.0.0", self.port), self._make_handler())
