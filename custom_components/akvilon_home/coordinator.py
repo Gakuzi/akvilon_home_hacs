@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from .const import DOMAIN
 from .protocol import AkvilonClient, CH_CAMERAS, CH_GATES, CH_METERS
+from .rtp_stream import RtpStream
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class AkvilonHub:
     name: str
 
     def __post_init__(self):
+        self.demo = False  # демо-режим (без сервера)
         self.client: AkvilonClient | None = None
         self._reader = None
         self._cams = []
@@ -55,6 +57,44 @@ class AkvilonHub:
             _LOGGER.warning("Аквилон: подключение не удалось: %s", exc)
             return False
 
+    def load_demo_data(self):
+        """Заполняет hub типовыми демо-данными (для визуального превью без сервера)."""
+        self.demo = True
+        self._cams = [
+            {"objectid": "111:69724", "name": "Reka 7 торец дома"},
+            {"objectid": "117:69858", "name": "Reka 7 Вид на калитку 2"},
+            {"objectid": "102:69861", "name": "Reka 7 Проезд 2"},
+            {"objectid": "67:69866", "name": "Reka 7 Холл лифт, лестница"},
+            {"objectid": "149:69879", "name": "Reka 7 Колясочная"},
+            {"objectid": "2:101967", "name": "Парадная 1-1"},
+            {"objectid": "3:101885", "name": "Парадная 1-2"},
+        ]
+        self._gates = [
+            {"objectid": "3:79649", "name": "Калитка 5", "cameraId": "", "controllerStatus": 1, "enabled": 1},
+            {"objectid": "2:79668", "name": "Калитка 4", "cameraId": "", "controllerStatus": 1, "enabled": 1},
+            {"objectid": "1:101908", "name": "Рекa 4, Проход 1-2", "cameraId": "3:101885", "controllerStatus": 1, "enabled": 1},
+            {"objectid": "2:101911", "name": "Рекa 4, Проход 1-1", "cameraId": "2:101967", "controllerStatus": 1, "enabled": 1},
+            {"objectid": "2:80649", "name": "Калитка 6", "cameraId": "117:69858", "controllerStatus": 1, "enabled": 1},
+        ]
+        self._meters = [
+            {"objectid": "3:93360", "name": "Квартира 31 ГВС", "deviceNumber": "80131", "resourceType": "2",
+             "current": {"value": 121.243, "unit": "м3", "dt": "2026-10-07 00:00", "values": [121.243]}},
+            {"objectid": "3:93395", "name": "Квартира 31 ХВС", "deviceNumber": "80132", "resourceType": "3",
+             "current": {"value": 88.4, "unit": "м3", "dt": "2026-10-07 00:00", "values": [88.4]}},
+            {"objectid": "3:91252", "name": "Квартира 31 Отопление", "deviceNumber": "80133", "resourceType": "4",
+             "current": {"value": 3.4, "unit": "Гкал", "dt": "2026-10-07 00:00", "values": [3.4]}},
+            {"objectid": "3:93464", "name": "Квартира 31 Электричество", "deviceNumber": "80134", "resourceType": "1",
+             "current": {"value": 9992.95, "unit": "кВт*ч", "dt": "2026-10-07 00:00", "values": [7255.78, 2737.17, 0, 0]}},
+        ]
+        self._intercoms = [
+            g for g in self._gates if str(g.get("cameraId") or "").strip() not in ("", "0:-1")
+        ]
+        self._last_ok = time.monotonic()
+        _LOGGER.info(
+            "Аквилон: демо-режим: камер=%d, калиток=%d, счётчиков=%d, домофонов=%d",
+            len(self._cams), len(self._gates), len(self._meters), len(self._intercoms),
+        )
+
     def refresh(self):
         """Получает свежие списки камер/калиток/счётчиков с сервера.
 
@@ -62,6 +102,8 @@ class AkvilonHub:
         Домофон = калитка/вход, у которой проставлен cameraId («калитка+камера»).
         Поэтому после загрузки калиток мы собираем intercoms из _gates.
         """
+        if self.demo:
+            return  # демо-режим: данные уже заполнены через load_demo_data
         for key, ch in (
             ("cameras", CH_CAMERAS),
             ("gates", CH_GATES),
@@ -184,6 +226,9 @@ class AkvilonHub:
         Открывает камеру через протокол, ловит ответ cameraSettings на канале
         0x2030401 и кэширует результат. Видео-порт приходит именно здесь, а не
         в живом списке камер (там поля videoPort нет).
+
+        ВАЖНО: НЕ вызываем register() — он портит UDP-сессию и сервер отвечает
+        на GET flag=0x82 (ERR). Подпись PASS в openCamera/GET достаточна.
         """
         try:
             sid = str(cam_id)
@@ -191,8 +236,6 @@ class AkvilonHub:
                 return self._video_settings[sid]
             cl = self._new_client()
             try:
-                cl.subscribe()
-                cl.register()
                 settings = cl.request_camera_settings(sid)
                 if settings:
                     self._video_settings[sid] = settings
@@ -222,6 +265,30 @@ class AkvilonHub:
         if vport:
             return f"rtsp://{vhost}:{vport}/cameras/{str(cam_id).replace(':', '_')}"
         return ""
+
+    def camera_frame(self, cam_id: str, timeout: float = 7.0) -> bytes | None:
+        """Захватывает реальный кадр камеры (JPEG) через RTP.
+
+        Вызывается ТОЛЬКО из executor (не на event loop): делает сетевые
+        операции и блокирующий декод ffmpeg. Возвращает JPEG-bytes или None.
+
+        Цепочка: openCamera -> cameraSettings (videoPort/videoToken) ->
+        отправить b"\x00\x00"+videoToken на videoPort -> принять RTP/H.264 ->
+        собрать IDR-кадр -> декодить в JPEG через ffmpeg.
+        """
+        try:
+            settings = self.get_camera_settings(cam_id)
+            if not settings or not settings.get("videoPort"):
+                _LOGGER.debug("Аквилон: нет настроек потока для камеры %s", cam_id)
+                return None
+            stream = RtpStream(settings)
+            try:
+                return stream.grab_jpeg(timeout=timeout)
+            finally:
+                stream.close()
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.warning("Аквилон: не удалось захватить кадр камеры %s: %s", cam_id, exc)
+            return None
 
     def close(self):
         if self.client:

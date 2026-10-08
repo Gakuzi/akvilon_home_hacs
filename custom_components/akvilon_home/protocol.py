@@ -99,7 +99,18 @@ def parse_qr(qr: str) -> dict:
                   'PASS', 'UDP', 'JOOAPORT', 'JOOAPIN', 'SERVERID', 'USEJOOA',
                   'SPACE', 'USERDATA', 'USER', 'SUID', 'DEF_UDP', 'CODE='):
             if i + 1 < len(toks):
-                out[up] = toks[i + 1].strip()
+                value = toks[i + 1].strip()
+                out[up] = value
+                # UDP несёт адрес сервера: 'IP' или 'IP:PORT' (после может идти
+                # отдельный токен порта: 'UDP;IP;PORT'). Если это IP — запомним
+                # его как HOST, а следующий числовой токен как PORT.
+                if up in ('UDP', 'DEF_UDP', 'HOST') and value and ':' not in value \
+                        and not value.isdigit() and '.' in value:
+                    out['HOST'] = value
+                    if i + 2 < len(toks) and toks[i + 2].strip().isdigit():
+                        out['PORT'] = int(toks[i + 2].strip())
+                        i += 3
+                        continue
                 i += 2
             else:
                 i += 1
@@ -115,6 +126,14 @@ def parse_qr(qr: str) -> dict:
                 out['SERVER_ID'] = sid
             elif left and right.isdigit():
                 out['HOST'], out['PORT'] = left, int(right)
+    # HOST/PORT могут прийти также в значении ключа с '=' (UDP=IP:PORT)
+    for k in ('UDP', 'DEF_UDP'):
+        v = out.get(k) or ""
+        if ':' in v and not v.startswith('http'):
+            host, _, port = v.partition(':')
+            if _ and host and port.isdigit():
+                out.setdefault('HOST', host)
+                out.setdefault('PORT', int(port))
     out.setdefault('HOST', '127.0.0.1')
     out.setdefault('PORT', 19090)
     dev = out.get('DEVICE_ID') or out.get('DEVICEID') or out.get('DEVICE')
@@ -357,7 +376,7 @@ class AkvilonClient:
         return self.send(CMD_EVENT, 0x01, 0x200, payload)
 
 
-    def register(self, device_uuid="2::bc6c9020029043179521d917c05504fc"):
+    def register(self, device_uuid="2::device_uuid_placeholder"):
         """Регистрация приложения на сервере (канал 0x02020001).
 
         Без неё сервер молча игнорирует GET-запросы списков.
@@ -528,7 +547,7 @@ class AkvilonClient:
                 return None
         return None
 
-    def get_list(self, channel, timeout=30.0, sessions=6) -> list:
+    def get_list(self, channel, timeout=30.0, sessions=6, batch=9) -> list:
         """GET-ALL списка по каналу. Возвращает список JSON-объектов.
 
         Сервер объявляет в бинарном заголовке полный count (напр. 69 камер),
@@ -569,16 +588,40 @@ class AkvilonClient:
                 if attempt < sessions - 1:
                     self._new_session()
                 continue
-            for i, (oid, rflag) in enumerate(missing):
-                obj = self._fetch_one(channel, oid, rflag, i + 1)
-                if obj and isinstance(obj, dict):
-                    oid_s = _safe_str(obj.get("objectid") or obj.get("objectId") or _safe_str(oid))
-                    if oid_s and oid_s not in seen:
-                        seen[oid_s] = obj
-                        order.append(oid_s)
-                # маленькая пауза между поштучными запросами (проверено: так
-                # сервер отдаёт почти все тела; без паузы теряет часть)
-                time.sleep(0.4)
+            # Пакетный сбор: шлём id группами по batch штук подряд и собираем
+            # JSON-тела. Сервер отвечает на первые ~9-18 быстро, поэтому пачек
+            # на 69 камер хватает без поштучной задержки (0.4с на камеру).
+            q = self._channel_queue(channel)
+            missing = [(o, f) for (o, f) in known_ids if _safe_str(o) not in seen]
+            for i in range(0, len(missing), batch):
+                chunk = missing[i:i + batch]
+                for idx, (oid, rflag) in enumerate(chunk):
+                    self.sock.sendto(self._build(CMD_GET, 0x00, channel,
+                                                 get_list_payload(2, oid, rflag, i + idx + 1)),
+                                     (self.host, self.port))
+                # короткая пауза между пачками, чтобы сервер успел отдать волну
+                time.sleep(0.05)
+                need = len(chunk)
+                dead = time.time() + 1.2
+                while time.time() < dead and len(seen) < declared_max:
+                    try:
+                        d = q.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
+                    if len(d) < MIN_PKT:
+                        continue
+                    p = d[HEADER_LEN:len(d) - MD5_LEN]
+                    if not (p.startswith(b'{') or p.startswith(b'[')):
+                        continue
+                    try:
+                        o = json.loads(p.decode("utf-8", "replace"))
+                    except Exception:
+                        continue
+                    if isinstance(o, dict) and o.get("objectid"):
+                        oid_s = _safe_str(o.get("objectid") or o.get("objectId"))
+                        if oid_s and oid_s not in seen:
+                            seen[oid_s] = o
+                            order.append(oid_s)
             if declared_max and len(seen) >= declared_max:
                 break
             if known_ids and all(_safe_str(o) in seen for o, _ in known_ids):
@@ -646,6 +689,22 @@ class AkvilonClient:
                                 pass
             time.sleep(0.2)
         return None
+
+    def send_video_token(self, vhost: str, vport: int, video_token: str):
+        """Запускает RTP-поток камеры: шлёт подписочный пакет на видео-порт.
+
+        Точный формат подписки (восстановлен по pcap приложения inHome):
+        UDP-датаграмма = b"\\x00\\x00" + ascii(videoToken), отправляемая на
+        videoHost:videoPort. После этого сервер стримит RTP/H.264 на тот же
+        клиентский UDP-порт, с которого был отправлен пакет.
+        """
+        payload = b"\x00\x00" + str(video_token).encode("ascii")
+        try:
+            self.sock.sendto(payload, (vhost, int(vport)))
+            return True
+        except Exception as exc:  # pragma: no cover
+            _LOG.debug("[akvilon_home] send_video_token err: %s", exc)
+            return False
 
     def close_camera(self, cam_id="0:-1"):
         payload = json.dumps({"id": str(cam_id), "name": "closeCamera"},
