@@ -12,7 +12,7 @@
       },
       "check_server": {
         "title": "Проверка соединения с сервером",
-        "description": "{message}",
+        "description": "Проверяю подключение к серверу…",
         "data": {}
       },
       "select_types": {

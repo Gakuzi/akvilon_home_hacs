@@ -123,7 +123,8 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                     # Строка распознана корректно — переходим к проверке сервера
                     return await self.async_step_check_server()
 
-        # Ключевые поля для индикатора (что распознано)
+        # Ключевые поля для индикатора (что распознано). Без эмодзи — они
+        # ломают отображение формы в HA на части устройств.
         checks = []
         if parsed:
             for key, label in QR_REQUIRED:
@@ -134,16 +135,15 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         else:
             checks = [(label, False, "—") for _, label in QR_REQUIRED]
 
-        # Строка-описание индикатора
-        def _dot(ok: bool) -> str:
-            return "🟢" if ok else "🔴"
-
-        indicator_lines = "\n".join(f"{_dot(ok)} {label}: {disp}" for label, ok, disp in checks)
+        mark_ok = "\u2713"  # ✓
+        mark_bad = "\u2717"  # ✗
+        indicator_lines = "; ".join(
+            f"{mark_ok if ok else mark_bad} {label}: {disp}" for label, ok, disp in checks
+        )
         note = (
             "Вставьте строку подключения от застройщика или QR-код — она будет "
-            "автоматически распознана. Ниже показано, что распознано:"
-            "\n\n" + indicator_lines
-            + ("\n\n" + "❗ Не хватает: " + ", ".join(missing) if missing else "")
+            "автоматически распознана. Что распознано: " + indicator_lines
+            + (" . Не хватает: " + ", ".join(missing) + "." if missing else "")
         )
 
         return self.async_show_form(
@@ -159,59 +159,36 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_check_server(self, user_input: dict | None = None) -> FlowResult:
         """Быстрая проверка доступности сервера здания и понятный результат.
 
-        Исходы:
-          - ok         -> сервер отвечает, устройства получены -> дальше к выбору;
-          - unreachable-> сервер не отвечает на ping -> «Сервер недоступен»;
-          - no_devices -> сервер доступен, но списки пусты -> совет по диагностике.
+        Если сервер доступен и устройства получены — сразу переходим к выбору.
+        Иначе показываем понятную причину на русском (без эмодзи — они ломают
+        отрисовку формы на части устройств).
         """
-        status_state = "checking"
-        message = "Проверяю соединение с сервером…"
-
         try:
             # Сначала быстрая проверка доступности (ping)
             ping_ok = await self.hass.async_add_executor_job(self._ping_server)
             if not ping_ok:
-                status_state = "unreachable"
-                message = (
-                    "✅ Строка распознана корректно.\n\n"
-                    "🔴 Сервер здания НЕ доступен.\n"
-                    "Проверьте сеть (Wi-Fi/интернет) и что сервер здания включён. "
-                    "Если сообщение повторяется — сервер временно недоступен, "
-                    "повторите позже."
+                return self.async_show_form(
+                    step_id="check_server",
+                    data_schema=vol.Schema({}),
+                    errors={"base": "server_unreachable"},
                 )
-            else:
-                # Сервер ответил — пробуем загрузить устройства
-                devices, load_ok = await self.hass.async_add_executor_job(self._load_devices_full)
-                if load_ok and devices:
-                    self._devices = devices
-                    status_state = "ok"
-                    message = (
-                        "✅ Server доступен.\n\n"
-                        f"Найдено устройств: {len(devices)}.\n"
-                        "Переходим к выбору типов и устройств."
-                    )
-                else:
-                    status_state = "no_devices"
-                    message = (
-                        "✅ Server доступен, но не вернул список устройств.\n"
-                        "Проверьте правильность ключа подключения. Если вы уверены "
-                        "в ключе — попробуйте позже (сервер мог быть занят)."
-                    )
+            # Сервер ответил — пробуем загрузить устройства
+            devices, load_ok = await self.hass.async_add_executor_job(self._load_devices_full)
+            if load_ok and devices:
+                self._devices = devices
+                return await self.async_step_select_types()
+            return self.async_show_form(
+                step_id="check_server",
+                data_schema=vol.Schema({}),
+                errors={"base": "no_devices"},
+            )
         except Exception as exc:  # pragma: no cover
             _LOGGER.warning("[akvilon_home][flow] ошибка при проверке сервера: %s", exc)
-            status_state = "unreachable"
-            message = (
-                "⚠️ Не удалось проверить соединение с сервером.\n"
-                "Проверьте сеть и повторите попытку. Если ошибка повторяется — "
-                "сервер здания временно недоступен."
+            return self.async_show_form(
+                step_id="check_server",
+                data_schema=vol.Schema({}),
+                errors={"base": "cannot_connect"},
             )
-
-        return self.async_show_form(
-            step_id="check_server",
-            data_schema=vol.Schema({}),
-            description_placeholders={"message": message},
-            errors={"base": status_state} if status_state != "ok" else None,
-        )
 
     # ------------------------------------------------------------------
     # Шаг 3: выбор типов устройств (с иконками и подсказками)
