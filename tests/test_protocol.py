@@ -60,11 +60,11 @@ class TestParseQr:
         assert out["TOKEN"] == b""
 
     def test_server_id_split(self):
-        qr = "DEVICEID;0:0;PASS;x;SERVERID;7:48390;UDP;127.0.0.1;19090"
+        qr = "DEVICEID;0:0;PASS;x;SERVERID;7:1000;UDP;127.0.0.1;19090"
         out = parse_qr(qr)
         assert out["SERVERFLAG"] == "7"
-        assert out["SERVERID_NUM"] == "48390"
-        assert out["SERVER_ID"] == "7:48390"
+        assert out["SERVERID_NUM"] == "1000"
+        assert out["SERVER_ID"] == "7:1000"
 
 
 # ---------------------------------------------------------------------------

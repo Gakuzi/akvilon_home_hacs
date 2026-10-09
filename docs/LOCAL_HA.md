@@ -1,4 +1,4 @@
-# Локальный тестовый Home Assistant (для агентов)
+﻿# Локальный тестовый Home Assistant (для агентов)
 
 > ОБЯЗАТЕЛЬНО к прочтению любым агентом перед тестированием интеграции Akvilon.
 > Логический принцип: тестируем НА ЛОКАЛЬНОМ HA, не на рабочем Pi, чтобы не
@@ -17,12 +17,12 @@
 | Адрес | `http://localhost:8123` |
 | Логин | `admin` |
 | Пароль | `admin1234` |
-| Имя пользователя в HA | «Евгений Александрович Климов» (владелец) |
+| Имя пользователя в HA | «Владелец квартиры» (создан при первой настройке) |
 
 ## Пути
 
-- Конфиг (рабочий): `C:\Users\eklim\AppData\Local\Temp\gigatool\ha_local_config`
-- Чистый бэкап: `C:\Users\eklim\AppData\Local\Temp\gigatool\ha_backup_clean`
+- Конфиг (рабочий): `%LOCALAPPDATA%\gigatool\ha_local_config`
+- Чистый бэкап: `%LOCALAPPDATA%\gigatool\ha_backup_clean`
   (копия всего конфига с учёткой и настройками; быстрое восстановление)
 
 ## Быстрое развёртывание чистого HA из бэкапа
@@ -34,12 +34,12 @@
 docker rm -f ha-local
 
 # 2. Пересоздать конфиг из чистого бэкапа
-Remove-Item -Recurse -Force C:\Users\eklim\AppData\Local\Temp\gigatool\ha_local_config
-Copy-Item -Recurse C:\Users\eklim\AppData\Local\Temp\gigatool\ha_backup_clean C:\Users\eklim\AppData\Local\Temp\gigatool\ha_local_config
+Remove-Item -Recurse -Force %LOCALAPPDATA%\gigatool\ha_local_config
+Copy-Item -Recurse %LOCALAPPDATA%\gigatool\ha_backup_clean %LOCALAPPDATA%\gigatool\ha_local_config
 
 # 3. Запустить контейнер
 docker run -d --name ha-local -e TZ=Europe/Moscow -p 8123:8123 `
-  -v "C:\Users\eklim\AppData\Local\Temp\gigatool\ha_local_config:/config" `
+  -v "%LOCALAPPDATA%\gigatool\ha_local_config:/config" `
   ghcr.io/home-assistant/home-assistant:stable
 
 # 4. Подождать ~50 сек, открыть http://localhost:8123, войти admin/admin1234
@@ -47,7 +47,7 @@ docker run -d --name ha-local -e TZ=Europe/Moscow -p 8123:8123 `
 
 Либо проще — запустить готовый скрипт:
 ```powershell
-powershell -File C:\Users\eklim\AppData\Local\Temp\gigatool\ha_local_config\deploy_ha_local.ps1
+powershell -File %LOCALAPPDATA%\gigatool\ha_local_config\deploy_ha_local.ps1
 ```
 
 ## Как сделать свежий бэкап
@@ -57,8 +57,8 @@ powershell -File C:\Users\eklim\AppData\Local\Temp\gigatool\ha_local_config\depl
 ```powershell
 # остановить HA, чтобы файлы были консистентны
 docker stop ha-local
-Remove-Item -Recurse -Force C:\Users\eklim\AppData\Local\Temp\gigatool\ha_backup_clean
-Copy-Item -Recurse C:\Users\eklim\AppData\Local\Temp\gigatool\ha_local_config C:\Users\eklim\AppData\Local\Temp\gigatool\ha_backup_clean
+Remove-Item -Recurse -Force %LOCALAPPDATA%\gigatool\ha_backup_clean
+Copy-Item -Recurse %LOCALAPPDATA%\gigatool\ha_local_config %LOCALAPPDATA%\gigatool\ha_backup_clean
 docker start ha-local
 ```
 
