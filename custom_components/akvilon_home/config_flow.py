@@ -1,19 +1,24 @@
-"""Config flow для интеграции Аквилон InHome.
+"""Config flow для интеграции Аквилон InHome (улучшенный мастер).
 
-Пошаговый мастер настройки:
-  1) ввод строки подключения (QR) + название. Сразу после распознания ключа
-     выполняется проверка сервера: доступен ли он, вернул ли устройства.
-     Результат показывается прямо на первом шаге (понятная ошибка на русском),
-     затем идёт выбор ТИПОВ устройств (камеры/калитки/домофоны/счётчики),
-     выбор конкретных устройств и финальные опции (дашборд/Энергия/тарифы).
+Пошаговый мастер настройки (всё на русском):
+  1) «user» — вставка строки подключения (QR/ключ) + название. Сразу после
+     ввода выполняется автоматический разбор строки, и показывается, что
+     распознано (хост, порт, устройство, сервер, пароль) с индикатором
+     «распознано / не распознано»;
+  2) «check_server» — проверка доступности сервера здания (быстрый UDP-тест).
+     Пользователь сразу видит: «Сервер доступен», «Сервер недоступен» или
+     «Сервер доступен, но не вернул устройства», с понятными подсказками;
+  3) «select_types» — выбор ТИПОВ устройств (камеры/калитки/домофоны/счётчики)
+     с иконками и количеством;
+  4) «select» — выбор конкретных устройств (сгруппированы по типам, реальные
+     имена);
+  5) «finish» — доп. опции (создать дашборд, добавить в «Энергию», тарифы).
 
-Обработка ошибок (показываются на первом шаге):
-  - invalid_qr        -> не удалось распознать строку;
-  - server_unreachable-> сервер здания недоступен;
-  - cannot_connect    -> ошибка при подключении/загрузке;
-  - no_devices        -> сервер доступен, но не вернул устройств.
-
-Документация: https://github.com/Gakuzi/akvilon_home_hacs/blob/main/README.md
+Обработка ошибок (понятные сообщения на русском):
+  - invalid_qr         -> не удалось распознать строку (чего не хватает);
+  - server_unreachable -> сервер здания недоступен (нет сети / сервер выключен);
+  - cannot_connect     -> ошибка при подключении/загрузке;
+  - no_devices         -> сервер доступен, но вернул пустой список.
 """
 import logging
 
@@ -36,6 +41,7 @@ from .protocol import parse_qr
 
 _LOGGER = logging.getLogger(__name__)
 
+# Поле для ввода строки подключения
 QR_SCHEMA = vol.Schema(
     {
         vol.Required("connection_string"): str,
@@ -43,13 +49,23 @@ QR_SCHEMA = vol.Schema(
     }
 )
 
+# Метаданные типов устройств: (название группы, иконка, подсказка)
 TYPE_META = {
-    "camera": ("Камеры", "mdi:cctv"),
-    "gate": ("Калитки", "mdi:gate"),
-    "intercom": ("Домофоны", "mdi:phone-in-talk"),
-    "meter": ("Счётчики", "mdi:counter"),
+    "camera": ("Камеры", "mdi:cctv", "Видеонаблюдение комплекса"),
+    "gate": ("Калитки", "mdi:gate", "Проходы / двери, открываемые кнопкой"),
+    "intercom": ("Домофоны", "mdi:phone-in-talk", "Калитки с привязанной камерой"),
+    "meter": ("Счётчики", "mdi:counter", "Показания ГВС, ХВС, отопления, электричества"),
 }
 TYPE_ORDER = ["camera", "gate", "intercom", "meter"]
+
+# Ключевые поля, которые должны быть распознаны из строки (для индикатора разбора)
+QR_REQUIRED = [
+    ("HOST", "хост сервера"),
+    ("PORT", "порт"),
+    ("DEVICE_ID", "устройство (DEVICE_ID)"),
+    ("PASS", "пароль (PASS)"),
+    ("SERVER_ID", "сервер (SERVER_ID)"),
+]
 
 
 class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
@@ -64,58 +80,141 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         self._cur_selected = []
         self._entry_title = None
 
+    # ------------------------------------------------------------------
+    # Шаг 1: ввод ключа + разбор с индикатором
+    # ------------------------------------------------------------------
     async def async_step_user(self, user_input: dict | None = None) -> FlowResult:
         errors: dict[str, str] = {}
+        parsed: dict | None = None
+        missing: list[str] = []
+
         if user_input is not None:
             qr = (user_input.get("connection_string") or "").strip()
             if not qr:
                 errors["base"] = "invalid_qr"
+                missing = ["строку подключения (поле пустое)"]
             else:
-                params = parse_qr(qr)
-                if not params.get("HOST") or not params.get("DEVICE_ID") or not params.get("PASS"):
-                    _LOGGER.error("[akvilon_home][flow] Недостаточно полей: %s", params)
+                parsed = parse_qr(qr)
+                # что не распознано — соберём список для индикатора
+                missing = [
+                    label
+                    for key, label in QR_REQUIRED
+                    if key != "PORT" and not parsed.get(key)
+                ]
+                if not parsed.get("PORT"):
+                    missing.append("порт")
+                if not parsed.get("HOST") or not parsed.get("DEVICE_ID") or not parsed.get("PASS"):
+                    _LOGGER.error("[akvilon_home][flow] Недостаточно полей: %s", parsed)
                     errors["base"] = "invalid_qr"
                 else:
                     self._params = {
-                        CONF_HOST: params["HOST"],
-                        CONF_PORT: int(params.get("PORT", 19090)),
-                        CONF_TOKEN: params.get("SUID", ""),
-                        CONF_DEVICE_ID: params["DEVICE_ID"],
-                        CONF_SERVER_ID: params.get(
-                            "SERVER_ID", params.get("SERVERFLAG", "") + ":" + params.get("SERVERID_NUM", "")
+                        CONF_HOST: parsed["HOST"],
+                        CONF_PORT: int(parsed.get("PORT", 19090)),
+                        CONF_TOKEN: parsed.get("SUID", ""),
+                        CONF_DEVICE_ID: parsed["DEVICE_ID"],
+                        CONF_SERVER_ID: parsed.get(
+                            "SERVER_ID",
+                            parsed.get("SERVERFLAG", "") + ":" + parsed.get("SERVERID_NUM", ""),
                         ),
                         CONF_NAME: user_input.get(CONF_NAME) or DEFAULT_NAME,
-                        "_PASS": params.get("PASS", ""),
+                        "_PASS": parsed.get("PASS", ""),
+                        "connection_string": qr,
                     }
-                    # Проверка сервера: пробуем загрузить устройства.
-                    # Сервер сейчас недоступен — методами подключения нельзя
-                    # отличить «нет сети» от «сервер не отвечает», поэтому
-                    # при исключении показываем понятное сообщение.
-                    devices = []
-                    try:
-                        devices = await self._load_devices()
-                    except Exception as exc:  # pragma: no cover
-                        _LOGGER.warning("[akvilon_home][flow] ошибка проверки сервера: %s", exc)
-                        devices = []
-                    if devices:
-                        self._devices = devices
-                        return await self.async_step_select_types()
-                    errors["base"] = "no_devices"
+                    # Строка распознана корректно — переходим к проверке сервера
+                    return await self.async_step_check_server()
+
+        # Ключевые поля для индикатора (что распознано)
+        checks = []
+        if parsed:
+            for key, label in QR_REQUIRED:
+                val = parsed.get(key)
+                ok = bool(val)
+                disp = str(val) if ok else "—"
+                checks.append((label, ok, disp))
+        else:
+            checks = [(label, False, "—") for _, label in QR_REQUIRED]
+
+        # Строка-описание индикатора
+        def _dot(ok: bool) -> str:
+            return "🟢" if ok else "🔴"
+
+        indicator_lines = "\n".join(f"{_dot(ok)} {label}: {disp}" for label, ok, disp in checks)
+        note = (
+            "Вставьте строку подключения от застройщика или QR-код — она будет "
+            "автоматически распознана. Ниже показано, что распознано:"
+            "\n\n" + indicator_lines
+            + ("\n\n" + "❗ Не хватает: " + ", ".join(missing) if missing else "")
+        )
 
         return self.async_show_form(
             step_id="user",
             data_schema=QR_SCHEMA,
             errors=errors,
-            description_placeholders={
-                "note": (
-                    "Вставьте строку подключения от застройщика или QR-код. "
-                    "После распознания ключа выполняется проверка соединения."
-                )
-            },
+            description_placeholders={"note": note},
         )
 
     # ------------------------------------------------------------------
-    # Шаг 2: выбор типов устройств (с иконками)
+    # Шаг 2: проверка доступности сервера (диагностика)
+    # ------------------------------------------------------------------
+    async def async_step_check_server(self, user_input: dict | None = None) -> FlowResult:
+        """Быстрая проверка доступности сервера здания и понятный результат.
+
+        Исходы:
+          - ok         -> сервер отвечает, устройства получены -> дальше к выбору;
+          - unreachable-> сервер не отвечает на ping -> «Сервер недоступен»;
+          - no_devices -> сервер доступен, но списки пусты -> совет по диагностике.
+        """
+        status_state = "checking"
+        message = "Проверяю соединение с сервером…"
+
+        try:
+            # Сначала быстрая проверка доступности (ping)
+            ping_ok = await self.hass.async_add_executor_job(self._ping_server)
+            if not ping_ok:
+                status_state = "unreachable"
+                message = (
+                    "✅ Строка распознана корректно.\n\n"
+                    "🔴 Сервер здания НЕ доступен.\n"
+                    "Проверьте сеть (Wi-Fi/интернет) и что сервер здания включён. "
+                    "Если сообщение повторяется — сервер временно недоступен, "
+                    "повторите позже."
+                )
+            else:
+                # Сервер ответил — пробуем загрузить устройства
+                devices, load_ok = await self.hass.async_add_executor_job(self._load_devices_full)
+                if load_ok and devices:
+                    self._devices = devices
+                    status_state = "ok"
+                    message = (
+                        "✅ Server доступен.\n\n"
+                        f"Найдено устройств: {len(devices)}.\n"
+                        "Переходим к выбору типов и устройств."
+                    )
+                else:
+                    status_state = "no_devices"
+                    message = (
+                        "✅ Server доступен, но не вернул список устройств.\n"
+                        "Проверьте правильность ключа подключения. Если вы уверены "
+                        "в ключе — попробуйте позже (сервер мог быть занят)."
+                    )
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.warning("[akvilon_home][flow] ошибка при проверке сервера: %s", exc)
+            status_state = "unreachable"
+            message = (
+                "⚠️ Не удалось проверить соединение с сервером.\n"
+                "Проверьте сеть и повторите попытку. Если ошибка повторяется — "
+                "сервер здания временно недоступен."
+            )
+
+        return self.async_show_form(
+            step_id="check_server",
+            data_schema=vol.Schema({}),
+            description_placeholders={"message": message},
+            errors={"base": status_state} if status_state != "ok" else None,
+        )
+
+    # ------------------------------------------------------------------
+    # Шаг 3: выбор типов устройств (с иконками и подсказками)
     # ------------------------------------------------------------------
     async def async_step_select_types(self, user_input: dict | None = None) -> FlowResult:
         errors: dict[str, str] = {}
@@ -137,9 +236,13 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         options = []
         for t in TYPE_ORDER:
             if type_count.get(t, 0) > 0:
-                group_name, icon = TYPE_META.get(t, (t, "mdi:view-grid"))
+                group_name, icon, hint = TYPE_META.get(t, (t, "mdi:view-grid", ""))
                 options.append(
-                    {"value": t, "label": f"{group_name} · {type_count[t]}", "icon": icon}
+                    {
+                        "value": t,
+                        "label": f"{group_name} · {type_count[t]} — {hint}",
+                        "icon": icon,
+                    }
                 )
         schema = vol.Schema(
             {
@@ -158,7 +261,7 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ------------------------------------------------------------------
-    # Шаг 3: выбор конкретных устройств
+    # Шаг 4: выбор конкретных устройств
     # ------------------------------------------------------------------
     async def async_step_select(self, user_input: dict | None = None) -> FlowResult:
         errors: dict[str, str] = {}
@@ -180,9 +283,14 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             key=lambda d: (TYPE_ORDER.index(d["type"]) if d["type"] in TYPE_ORDER else 9,
                            dev_name(d).lower()),
         ):
-            group_name, icon = TYPE_META.get(dev["type"], (dev["type"], "mdi:view-grid"))
+            group_name, icon, _hint = TYPE_META.get(dev["type"], (dev["type"], "mdi:view-grid", ""))
             option_list.append(
-                {"value": dev["id"], "label": dev_name(dev), "icon": icon, "group": group_name}
+                {
+                    "value": dev["id"],
+                    "label": dev_name(dev),
+                    "icon": icon,
+                    "group": group_name,
+                }
             )
         default_sel = [d["id"] for d in self._devices]
         schema = vol.Schema(
@@ -202,7 +310,7 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ------------------------------------------------------------------
-    # Шаг 4: финальные опции
+    # Шаг 5: финальные опции
     # ------------------------------------------------------------------
     async def async_step_finish(self, user_input: dict | None = None) -> FlowResult:
         errors: dict[str, str] = {}
@@ -244,7 +352,7 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     # ------------------------------------------------------------------
-    # Загрузка списков устройств с сервера
+    # Загрузка / проверка сервера (executor — не блокирует event loop)
     # ------------------------------------------------------------------
     def _build_client(self):
         from .protocol import AkvilonClient
@@ -257,6 +365,15 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             server_id=self._params[CONF_SERVER_ID],
             pass_hex=_pass,  # подпись строится из pass_hex (иначе дефолт PASS_PLACEHOLDER)
         )
+
+    def _ping_server(self) -> bool:
+        """Быстрая проверка доступности сервера по UDP."""
+        cl = self._build_client()
+        try:
+            return cl.ping(timeout=4.0)
+        finally:
+            cl._running = False
+            cl.close()
 
     def _load_devices_sync(self):
         from .protocol import CH_CAMERAS, CH_GATES, CH_METERS
@@ -278,24 +395,44 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             cl.close()
         return cams, gates, mets
 
-    async def _load_devices(self):
-        cams, gates, mets = await self.hass.async_add_executor_job(self._load_devices_sync)
+    def _load_devices_full(self):
+        """Возвращает (devices, ok). Загрузка всех списков и сборка устройств."""
+        try:
+            cams, gates, mets = self._load_devices_sync()
+            devices = self._build_devices(cams, gates, mets)
+            return devices, True
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.warning("[akvilon_home][flow] загрузка устройств не удалась: %s", exc)
+            return [], False
+
+    @staticmethod
+    def _build_devices(cams, gates, mets):
         devices = []
         for c in cams:
             oid = str(c.get("objectid") or c.get("objectId") or "")
             if oid:
-                devices.append({"id": oid, "name": clean_name(c, "Камера", oid), "type": "camera"})
+                devices.append(
+                    {"id": oid, "name": clean_name(c, "Камера", oid), "type": "camera"}
+                )
         for g in gates:
             oid = str(g.get("objectid") or g.get("objectId") or "")
             if oid:
                 cam = str(g.get("cameraId") or "")
                 kind = "intercom" if cam and cam != "0:-1" else "gate"
                 label = "Домофон" if kind == "intercom" else "Калитка"
-                devices.append({"id": oid, "name": clean_name(g, label, oid), "type": kind})
+                devices.append(
+                    {"id": oid, "name": clean_name(g, label, oid), "type": kind}
+                )
         for m in mets:
             oid = str(m.get("objectid") or m.get("objectId") or "")
             if oid:
-                devices.append({"id": oid, "name": clean_name(m, "Счётчик", oid), "type": "meter"})
+                devices.append(
+                    {"id": oid, "name": clean_name(m, "Счётчик", oid), "type": "meter"}
+                )
+        return devices
+
+    async def _load_devices(self):
+        devices, _ok = await self.hass.async_add_executor_job(self._load_devices_full)
         return devices
 
     async def async_step_reconfigure(self, user_input: dict | None = None) -> FlowResult:

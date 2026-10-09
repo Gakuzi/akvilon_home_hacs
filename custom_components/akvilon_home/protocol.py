@@ -270,6 +270,29 @@ class AkvilonClient:
         except Exception:
             return False
 
+    def ping(self, timeout: float = 4.0) -> bool:
+        """Быстрая проверка доступности сервера: шлёт подписочный пакет и ждёт ответа.
+
+        Используется мастером настройки на шаге проверки соединения, чтобы сразу
+        понять, доступен ли сервер здания, не дожидаясь полной загрузки списков.
+        """
+        try:
+            if not self.sock:
+                self.connect()
+            if not self.sock:
+                return False
+            self.sock.settimeout(timeout)
+            # подписочный пакет на канал 0x200 (один канал) — сервер обязан ответить ACK
+            payload = struct.pack("<I", 1) + struct.pack("<II", 0x10401, 0)
+            self.sock.sendto(self._build(CMD_EVENT, 0x01, 0x200, payload),
+                             (self.host, self.port))
+            data, _ = self.sock.recvfrom(MAX_UDP)
+            return data is not None and len(data) >= MIN_PKT
+        except socket.timeout:
+            return False
+        except Exception:
+            return False
+
     def ensure_session(self):
         """Идемпотентная инициализация сессии: connect + subscribe + register + reader."""
         if self.sock is None:
