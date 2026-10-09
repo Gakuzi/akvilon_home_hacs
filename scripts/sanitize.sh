@@ -31,12 +31,12 @@ if [ -f "$SECRETS_FILE" ]; then
 fi
 
 # Значения по умолчанию (если не заданы в secrets.local)
-HOST="${AKVILON_HOST:-91.122.221.217}"
-DEVICE_ID="${AKVILON_DEVICE_ID:-34:50957}"
+HOST="${AKVILON_HOST:-127.0.0.1}"
+DEVICE_ID="${AKVILON_DEVICE_ID:-0:0}"
 SERVER_ID="${AKVILON_SERVER_ID:-7:48390}"
-PASS="${AKVILON_PASS:-9c5edcb9}"
-SUID="${AKVILON_SUID:-fec8df007bfd4e368d92a67a152840df}"
-TOKEN="${AKVILON_TOKEN:-token_34:50957}"
+PASS="${AKVILON_PASS:-PASS_PLACEHOLDER}"
+SUID="${AKVILON_SUID:-SUID_PLACEHOLDER}"
+TOKEN="${AKVILON_TOKEN:-token_0:0}"
 
 # Плейсхолдеры (безопасные, публичные)
 P_HOST="127.0.0.1"
