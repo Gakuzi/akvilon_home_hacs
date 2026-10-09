@@ -123,6 +123,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.async_add_executor_job(_connect_refresh)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Автоматическое создание дашборда «Аквилон» (камеры/калитки/счётчики/домофоны)
+    try:
+        from .dashboard import ensure_dashboard
+        await hass.async_add_executor_job(ensure_dashboard, hass, hub)
+    except Exception as e:
+        _LOGGER.warning("Аквилон: не удалось создать дашборд: %s", e)
     # Периодическое обновление данных с сервера (камеры/калитки/счётчики/домофоны)
     prev = {"cameras": set(), "gates": set(), "meters": set(), "intercoms": set()}
 
@@ -178,4 +184,10 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Очистка данных при удалении интеграции."""
     _LOGGER.info("Аквилон: удаление интеграции %s", entry.entry_id)
+    try:
+        from .dashboard import remove_dashboard
+        await hass.async_add_executor_job(remove_dashboard, hass)
+        _LOGGER.info("Аквилон: дашборд удалён")
+    except Exception as e:
+        _LOGGER.warning("Аквилон: не удалось удалить дашборд: %s", e)
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
