@@ -289,3 +289,61 @@ class TestHeaderParsing:
         recs = [(1, 0), (2, 0), (3, 0)]
         pkt = _header_packet(0x10401, 3, recs)
         assert cl._header_count(pkt) == 3
+
+
+class TestCameraMethods:
+    """Покрытие методов open/close camera и запуска видео-токена."""
+
+    def test_open_camera_sends_packet(self):
+        cl = _make_client()
+        resp_hdr = bytearray(64)
+        resp_hdr[0x36] = P.CMD_EVENT
+        resp_hdr[0x37] = P.FLAG_OK
+        cl.sock = _FakeSock(responses=[bytes(resp_hdr) + b"\x00" * 16])
+        r = cl.open_camera("111:69724")
+        assert r is not None
+        sent, _ = cl.sock.sent[0]
+        ch = struct.unpack_from("<I", sent, 0x38)[0]
+        assert ch == 0x30401
+        payload = sent[HEADER_LEN:-MD5_LEN]
+        assert b"openCamera" in payload
+        assert b"111:69724" in payload
+
+    def test_close_camera_sends_packet(self):
+        cl = _make_client()
+        resp_hdr = bytearray(64)
+        resp_hdr[0x36] = P.CMD_EVENT
+        resp_hdr[0x37] = P.FLAG_OK
+        cl.sock = _FakeSock(responses=[bytes(resp_hdr) + b"\x00" * 16])
+        r = cl.close_camera("111:69724")
+        assert r is not None
+        sent, _ = cl.sock.sent[0]
+        payload = sent[HEADER_LEN:-MD5_LEN]
+        assert b"closeCamera" in payload
+
+    def test_send_video_token(self):
+        cl = _make_client()
+        cl.sock = _FakeSock(responses=[])
+        ok = cl.send_video_token("127.0.0.1", 5010, "token_x")
+        assert ok is True
+        data, addr = cl.sock.sent[0]
+        assert data == b"\x00\x00" + b"token_x"
+        assert addr == ("127.0.0.1", 5010)
+
+    def test_send_video_token_no_sock_returns_false(self):
+        cl = _make_client()
+        cl.sock = None
+        # отсутствующий сокет -> False без исключения
+        assert cl.send_video_token("127.0.0.1", 5010, "tok") is False
+
+    def test_send_keepalive_calls_subscribe(self):
+        cl = _make_client()
+        resp_hdr = bytearray(64)
+        resp_hdr[0x36] = P.CMD_EVENT
+        resp_hdr[0x37] = P.FLAG_OK
+        cl.sock = _FakeSock(responses=[bytes(resp_hdr) + b"\x00" * 16])
+        r = cl.send_keepalive()
+        assert r is not None
+        sent, _ = cl.sock.sent[0]
+        ch = struct.unpack_from("<I", sent, 0x38)[0]
+        assert ch == 0x200
