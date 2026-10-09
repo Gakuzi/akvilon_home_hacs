@@ -5,8 +5,8 @@ UDP-протокол к серверу здания `127.0.0.1:19090`.
 
 ## Установка
 
-1. Установите интеграцию через [HACS](https://hacs.xyz) → «Custom repositories»
-   (URL `` и тип **Integration**), либо скопируйте папку
+1. Установите интеграцию через [HACS](https://hacs.xyz) → «Custom repositories»,
+   укажите URL репозитория и выберите тип **Integration**, либо скопируйте папку
    `custom_components/akvilon_home/` в `config/custom_components/`.
 2. Перезапустите Home Assistant.
 3. Настройки → Устройства и службы → «Добавить интеграцию» → **Аквилон InHome**.
