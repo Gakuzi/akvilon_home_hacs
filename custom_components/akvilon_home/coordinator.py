@@ -112,8 +112,9 @@ class AkvilonHub:
         ):
             cl = self._new_client()
             try:
-                cl.subscribe()
-                cl.register()
+                # ВАЖНО: НЕ вызываем subscribe()/register() для получения списков.
+                # register() портит UDP-сессию: сервер начинает отвечать flag=0x82
+                # (ERR) на GET, и камеры не приходят. Подписи PASS в пакетах достаточно.
                 self._last_ok = time.monotonic()
                 time.sleep(0.5)
                 # Камеры вытягиваются поштучно с паузой (см. protocol.get_list),

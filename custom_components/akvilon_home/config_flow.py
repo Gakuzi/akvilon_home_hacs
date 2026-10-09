@@ -265,8 +265,8 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         cl.connect()
         cl.start_reader()
         try:
-            cl.subscribe()
-            cl.register()
+            # ВАЖНО: НЕ вызываем subscribe()/register() для списков — register()
+            # портит UDP-сессию (сервер отвечает flag=0x82 на GET). Подпись PASS ок.
             import time
 
             time.sleep(0.5)
