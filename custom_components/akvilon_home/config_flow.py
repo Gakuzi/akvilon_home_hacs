@@ -249,11 +249,13 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     def _build_client(self):
         from .protocol import AkvilonClient
 
+        _pass = self._params.get("_PASS", "")
         return AkvilonClient(
             self._params[CONF_HOST], self._params[CONF_PORT],
-            self._params.get("_PASS", ""),
+            _pass,
             device_id=self._params[CONF_DEVICE_ID],
             server_id=self._params[CONF_SERVER_ID],
+            pass_hex=_pass,  # подпись строится из pass_hex (иначе дефолт PASS_PLACEHOLDER)
         )
 
     def _load_devices_sync(self):

@@ -43,6 +43,7 @@ class AkvilonHub:
         cl = AkvilonClient(
             self.host, self.port, self.token,
             device_id=self.device_id, server_id=self.server_id,
+            pass_hex=self.token,  # подпись строится из pass_hex (иначе дефолт PASS_PLACEHOLDER)
         )
         cl.connect()
         cl.start_reader()
@@ -206,6 +207,7 @@ class AkvilonHub:
         cl = AkvilonClient(
             self.host, self.port, self.token,
             device_id=self.device_id, server_id=self.server_id,
+            pass_hex=self.token,  # подпись из pass_hex (иначе сервер отвечает 0x82)
         )
         ok = False
         try:
