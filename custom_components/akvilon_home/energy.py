@@ -9,13 +9,9 @@ import logging
 
 from homeassistant.core import HomeAssistant
 
-_LOGGER = logging.getLogger(__name__)
+from .tariffs import parse_tariffs
 
-# Тарифы Архангельск (по умолчанию предлагаются в установщике).
-DEFAULT_EL_DAY = 8.67
-DEFAULT_EL_NIGHT = 3.91
-DEFAULT_WATER_COLD = 0.0
-DEFAULT_WATER_HOT = 0.0
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_energy(hass: HomeAssistant, entry) -> None:
@@ -25,10 +21,12 @@ async def async_setup_energy(hass: HomeAssistant, entry) -> None:
         _LOGGER.info("Аквилон: add_to_energy=False, пропускаю энергосистему")
         return
 
-    price_day = float(data.get("electricity_tariff_day") or DEFAULT_EL_DAY)
-    price_night = float(data.get("electricity_tariff_night") or DEFAULT_EL_NIGHT)
-    price_cold = float(data.get("cold_water_tariff") or DEFAULT_WATER_COLD)
-    price_hot = float(data.get("hot_water_tariff") or DEFAULT_WATER_HOT)
+    # Единый источник цен тарифов (defaults региона — из tariffs.py).
+    tariffs = parse_tariffs(data)
+    price_day = tariffs["electricity_tariff_day"]
+    price_night = tariffs["electricity_tariff_night"]
+    price_cold = tariffs["cold_water_tariff"]
+    price_hot = tariffs["hot_water_tariff"]
 
     # Находим entity_id наших сенсоров по префиксу (домен akvilon_home)
     elec_from = _find_entity(hass, "sensor", "schetchik_elektrichestvo")

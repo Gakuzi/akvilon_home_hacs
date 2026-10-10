@@ -30,12 +30,7 @@ from .const import (
     DEFAULT_NAME,
 )
 from .protocol import parse_qr
-from .energy import (
-    DEFAULT_EL_DAY,
-    DEFAULT_EL_NIGHT,
-    DEFAULT_WATER_COLD,
-    DEFAULT_WATER_HOT,
-)
+from .tariffs import TARIFF_FIELDS, parse_tariffs
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -151,10 +146,8 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             data["devices"] = self._devices
             data["create_dashboard"] = True
             data["add_to_energy"] = True
-            data["electricity_tariff_day"] = user_input.get("electricity_tariff_day", DEFAULT_EL_DAY)
-            data["electricity_tariff_night"] = user_input.get("electricity_tariff_night", DEFAULT_EL_NIGHT)
-            data["cold_water_tariff"] = user_input.get("cold_water_tariff", DEFAULT_WATER_COLD)
-            data["hot_water_tariff"] = user_input.get("hot_water_tariff", DEFAULT_WATER_HOT)
+            # Каноническая нормализация тарифов (missing/битые -> defaults региона).
+            data.update(parse_tariffs(user_input))
             title = self._params.get(CONF_NAME) or DEFAULT_NAME
             return self.async_create_entry(title=title, data=data)
 
@@ -165,21 +158,21 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             data["devices"] = self._devices
             data["create_dashboard"] = True
             data["add_to_energy"] = True
-            data["electricity_tariff_day"] = DEFAULT_EL_DAY
-            data["electricity_tariff_night"] = DEFAULT_EL_NIGHT
-            data["cold_water_tariff"] = DEFAULT_WATER_COLD
-            data["hot_water_tariff"] = DEFAULT_WATER_HOT
+            data.update(parse_tariffs(None))
             title = self._params.get(CONF_NAME) or DEFAULT_NAME
             return self.async_create_entry(title=title, data=data)
 
-        schema = vol.Schema(
-            {
-                vol.Required("electricity_tariff_day", default=DEFAULT_EL_DAY): vol.Coerce(float),
-                vol.Required("electricity_tariff_night", default=DEFAULT_EL_NIGHT): vol.Coerce(float),
-                vol.Optional("cold_water_tariff", default=DEFAULT_WATER_COLD): vol.Coerce(float),
-                vol.Optional("hot_water_tariff", default=DEFAULT_WATER_HOT): vol.Coerce(float),
-            }
-        )
+        # Электроэнергия (день/ночь) — обязательные поля; вода — опциональна.
+        required_keys = {"electricity_tariff_day", "electricity_tariff_night"}
+        schema_fields = {
+            (
+                vol.Required(key, default=default)
+                if key in required_keys
+                else vol.Optional(key, default=default)
+            ): vol.Coerce(float)
+            for key, default in TARIFF_FIELDS
+        }
+        schema = vol.Schema(schema_fields)
         note = (
             "Тарифы квартиры (по умолчанию — Архангельск, без газа). "
             "День/ночь электроэнергия, холодная и горячая вода. "
