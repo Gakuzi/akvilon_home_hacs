@@ -79,6 +79,34 @@ class TestLookups:
         assert h.camera_port("111:69724") == 0  # в демо-данных нет videoPort
 
 
+class TestMeterByNumber:
+    def test_find_by_device_number(self):
+        h = _hub()
+        meter = h.meter_by_number("80134")
+        assert meter is not None
+        assert meter.get("name") == "Квартира 31 Электричество"
+
+    def test_unknown_number_none(self):
+        h = _hub()
+        assert h.meter_by_number("999999") is None
+
+    def test_empty_number_none(self):
+        h = _hub()
+        assert h.meter_by_number("") is None
+        assert h.meter_by_number(None) is None
+
+    def test_returns_live_value_after_update(self):
+        h = _hub()
+        meter = h.meter_by_number("80134")
+        assert meter["current"]["value"] == 9992.95
+        # сервер обновил показание -> тот же deviceNumber возвращает свежее
+        h._meters = [m for m in h._meters if str(m.get("deviceNumber")) != "80134"]
+        h._meters.append({"deviceNumber": "80134", "name": "Эл",
+                          "current": {"value": 9999.0, "unit": "кВт*ч"}})
+        updated = h.meter_by_number("80134")
+        assert updated["current"]["value"] == 9999.0
+
+
 class TestIntercomLink:
     def test_link_fields(self):
         h = _hub()

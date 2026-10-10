@@ -14,6 +14,12 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Как часто метер/тариф-сенсоры перечитывают живой метер из hub (сек).
+# Значения счётчиков меняются редко (показания), поэтому редкий poll не создаёт
+# нагрузки на event-loop, но гарантирует, что показание и device_class не
+# «застывают» на значениях первой загрузки.
+_LIVE_POLL_INTERVAL = 60.0
+
 
 def _meter_current(meter: dict):
     """Извлекает показание: 'current' может быть вложенным JSON-строкой."""
@@ -50,18 +56,26 @@ def _normalize_unit(unit: str):
 
 
 class AkvilonMeterSensor(SensorEntity):
-    """Показание прибора учёта (счётчика) квартиры."""
+    """Показание прибора учёта (счётчика) квартиры.
 
+    Сенсор «живой»: хранит только device_number и label, а текущий метер и
+    показание читаются из hub на лету (``hub.meter_by_number``). Это значит,
+    что при обновлении данных на сервере сенсор покажет актуальное показание,
+    а не значение из момента первой регистрации.
+    """
+
+    _attr_should_poll = False
     _attr_has_entity_name = False
     _attr_state_class = "total_increasing"
 
-    def __init__(self, meter: dict):
+    def __init__(self, hub, meter: dict):
+        self._hub = hub
         self.meter = meter
         dn = _or_val(meter.get("deviceNumber") or meter.get("device_number"))
         name = meter.get("name") or "Счётчик"
         self._attr_unique_id = f"{DOMAIN}_meter_{dn}"
         self._label = name
-        self._device_number = dn
+        self._device_number = str(dn)
         # Привязка к устройству «Счётчик <название>»
         self._attr_device_info = {
             "identifiers": {meter_dev_id(dn)},
@@ -69,6 +83,15 @@ class AkvilonMeterSensor(SensorEntity):
             "manufacturer": "Аквилон InHome",
             "model": "Прибор учёта квартиры",
         }
+
+    def _live(self) -> dict:
+        """Возвращает актуальный метер из hub (или запасной self.meter)."""
+        if self._hub is not None:
+            live = self._hub.meter_by_number(self._device_number)
+            if live:
+                self.meter = live
+                return live
+        return self.meter or {}
 
     @property
     def name(self):
@@ -80,24 +103,44 @@ class AkvilonMeterSensor(SensorEntity):
 
     @property
     def native_value(self):
-        return _meter_value(self.meter)
+        return _meter_value(self._live())
 
     @property
     def native_unit_of_measurement(self):
-        cur = _meter_current(self.meter)
+        cur = _meter_current(self._live())
         if isinstance(cur, dict):
             unit = (cur.get("unit") or "").strip()
             return _normalize_unit(unit)
         return None
 
-    @property
-    def device_class(self):
-        t = str(self.meter.get("resourceType", ""))
+    @staticmethod
+    def _meter_device_class(meter: dict) -> str | None:
+        """Детерминированно определяет device_class счётчика.
+
+        Источник истины — единицы измерения показания: m³ → ``water``,
+        kWh/Гкал → ``energy``. ``resourceType`` с сервера может отсутствовать
+        (приходит без него для реальных приборов), поэтому полагаемся на
+        каноническую единицу. Если unit вне известных — без device_class
+        (HA не отбросит сенсор как «неверный класс»).
+        """
+        cur = _meter_current(meter)
+        unit = ""
+        if isinstance(cur, dict):
+            unit = _normalize_unit((cur.get("unit") or "").strip())
+        if unit in ("m³", "m3", "l", "gal"):
+            return "water"
+        if unit in ("kWh", "MWh", "Gcal", "kWh2"):
+            return "energy"
+        t = str(meter.get("resourceType", ""))
         if t in ("1",):  # electricity
             return "energy"
         if t in ("2", "3"):  # water
             return "water"
         return None
+
+    @property
+    def device_class(self):
+        return self._meter_device_class(self._live())
 
     @property
     def state_class(self):
@@ -108,15 +151,38 @@ class AkvilonMeterSensor(SensorEntity):
     def extra_state_attributes(self):
         attrs = {"integration": "akvilon_home"}
         attrs["device_number"] = self._device_number
-        attrs["resource_type"] = self.meter.get("resourceType")
-        attrs["meter_type"] = self.meter.get("meterType")
-        attrs["object_id"] = self.meter.get("objectid") or self.meter.get("objectId") or ""
-        cur = _meter_current(self.meter)
+        live = self._live()
+        attrs["resource_type"] = live.get("resourceType")
+        attrs["meter_type"] = live.get("meterType")
+        attrs["object_id"] = live.get("objectid") or live.get("objectId") or ""
+        cur = _meter_current(live)
         if isinstance(cur, dict):
             attrs["reading_date"] = cur.get("dt")
             if "values" in cur:
                 attrs["tariffs"] = cur["values"]
         return attrs
+
+    async def async_added_to_hass(self):
+        """Само-переобновление: периодически перечитываем живой метер из hub."""
+        await super().async_added_to_hass()
+        import asyncio
+
+        async def _poll():
+            while True:
+                try:
+                    await asyncio.sleep(_LIVE_POLL_INTERVAL)
+                    self._live()
+                    self.async_write_ha_state()
+                except asyncio.CancelledError:
+                    break
+                except Exception:  # noqa: BLE001
+                    break
+
+        self._poll_task = self.hass.loop.create_task(_poll())
+
+    async def async_will_remove_from_hass(self):
+        if getattr(self, "_poll_task", None):
+            self._poll_task.cancel()
 
 
 class AkvilonMeterTariffSensor(SensorEntity):
@@ -130,13 +196,15 @@ class AkvilonMeterTariffSensor(SensorEntity):
     _attr_has_entity_name = False
     _attr_device_class = "energy"
     _attr_state_class = "total_increasing"
+    _attr_should_poll = False
 
-    def __init__(self, meter: dict, tariff_index: int, tariff_label: str):
+    def __init__(self, hub, meter: dict, tariff_index: int, tariff_label: str):
+        self._hub = hub
         self.meter = meter
         self.tariff_index = tariff_index
         self._label = (meter.get("name") or "Счётчик") + f" ({tariff_label})"
         dn = _or_val(meter.get("deviceNumber") or meter.get("device_number"))
-        self._device_number = dn
+        self._device_number = str(dn)
         self._attr_unique_id = f"{DOMAIN}_meter_{dn}_tariff{tariff_index}"
         self._tariff_number = tariff_index + 1
         # Тот же device, что и основной счётчик (для Энергии: Т1/Т2 на одном приборе)
@@ -146,6 +214,14 @@ class AkvilonMeterTariffSensor(SensorEntity):
             "manufacturer": "Аквилон InHome",
             "model": "Прибор учёта квартиры",
         }
+
+    def _live(self) -> dict:
+        if self._hub is not None:
+            live = self._hub.meter_by_number(self._device_number)
+            if live:
+                self.meter = live
+                return live
+        return self.meter or {}
 
     @property
     def name(self):
@@ -157,7 +233,7 @@ class AkvilonMeterTariffSensor(SensorEntity):
 
     @property
     def native_value(self):
-        cur = _meter_current(self.meter)
+        cur = _meter_current(self._live())
         if isinstance(cur, dict) and isinstance(cur.get("values"), list):
             vals = cur["values"]
             if self.tariff_index < len(vals):
@@ -166,7 +242,7 @@ class AkvilonMeterTariffSensor(SensorEntity):
 
     @property
     def native_unit_of_measurement(self):
-        cur = _meter_current(self.meter)
+        cur = _meter_current(self._live())
         if isinstance(cur, dict):
             return _normalize_unit((cur.get("unit") or "").strip())
         return None
@@ -180,6 +256,28 @@ class AkvilonMeterTariffSensor(SensorEntity):
             "tariff": f"T{self._tariff_number}",
             "tariff_index": self.tariff_index,
         }
+
+    async def async_added_to_hass(self):
+        """Само-переобновление: перечитываем живой метер из hub по расписанию."""
+        await super().async_added_to_hass()
+        import asyncio
+
+        async def _poll():
+            while True:
+                try:
+                    await asyncio.sleep(_LIVE_POLL_INTERVAL)
+                    self._live()
+                    self.async_write_ha_state()
+                except asyncio.CancelledError:
+                    break
+                except Exception:  # noqa: BLE001
+                    break
+
+        self._poll_task = self.hass.loop.create_task(_poll())
+
+    async def async_will_remove_from_hass(self):
+        if getattr(self, "_poll_task", None):
+            self._poll_task.cancel()
 
 
 class AkvilonGateSensor(SensorEntity):
@@ -296,13 +394,13 @@ async def async_setup_entry(
     hub = hass.data[DOMAIN][entry.entry_id]
     sens = []
     for m in hub.meters:
-        sens.append(AkvilonMeterSensor(m))
+        sens.append(AkvilonMeterSensor(hub, m))
         # Двух-тарифный счётчик (электричество): значения T1/T2 -> День/Ночь
         cur = _meter_current(m)
         vals = cur.get("values") if isinstance(cur, dict) else None
         if isinstance(vals, list) and len(vals) >= 2:
-            sens.append(AkvilonMeterTariffSensor(m, 0, "День"))
-            sens.append(AkvilonMeterTariffSensor(m, 1, "Ночь"))
+            sens.append(AkvilonMeterTariffSensor(hub, m, 0, "День"))
+            sens.append(AkvilonMeterTariffSensor(hub, m, 1, "Ночь"))
     # Домофоны (intercoms) — подмножество калиток (gates с cameraId). Чтобы не
     # плодить дубли «калитка+домофон» на одну дверь, создаём для двери с камерой
     # ТОЛЬКО домофон, а для обычной калитки (без камеры) — калитку.

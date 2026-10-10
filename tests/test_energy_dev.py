@@ -4,6 +4,7 @@
 Стаб пакета akvilon_home создаётся в conftest.py (без загрузки __init__.py).
 """
 import akvilon_home.const as C  # noqa: E402
+import akvilon_home.energy as E  # noqa: E402
 
 
 def test_server_dev_id():
@@ -39,10 +40,10 @@ def test_energy_constants():
     assert C.PLATFORMS == ["camera", "button", "sensor", "binary_sensor"]
 
 
-def test_energy_module_functions():
-    # Проверим чистые функции энерго-модуля (не требуют HA).
-    import akvilon_home.energy as E
-
+# ---------------------------------------------------------------------------
+# Чистые функции energy.py
+# ---------------------------------------------------------------------------
+def test_upsert_source():
     sources = []
     # upsert воды — первый счётчик
     E._upsert_source(sources, "water", "sensor.a", 5.0)
@@ -61,7 +62,109 @@ def test_energy_module_functions():
     assert len(sources) == 2
     assert sources[1]["stat_energy_from"] == "sensor.b"
 
-    # ищем source по типу
+
+def test_find_source():
+    sources = []
+    E._upsert_source(sources, "water", "sensor.a", 5.0)
     found = E._find_source(sources, "water")
     assert found is not None
     assert E._find_source(sources, "gas") is None
+
+
+# ---------------------------------------------------------------------------
+# Классификация счётчиков (по единицам / resourceType / имени)
+# ---------------------------------------------------------------------------
+def test_unit_class():
+    assert E._unit_class("кВт*ч") == "energy"
+    assert E._unit_class("kWh") == "energy"
+    assert E._unit_class("м³") == "water"
+    assert E._unit_class("m3") == "water"
+    assert E._unit_class("Гкал") == "heating"
+    assert E._unit_class("см") is None
+    assert E._unit_class("") is None
+
+
+def test_classify_electricity_by_unit():
+    m = {"name": "Квартира 31 Электричество",
+         "current": {"unit": "кВт*ч", "value": 9984.0}}
+    assert E.classify_meter(m) == "electricity"
+
+
+def test_classify_electricity_no_unit_but_resource_type():
+    m = {"name": "X", "resourceType": "1", "current": {"unit": "", "value": 1}}
+    assert E.classify_meter(m) == "electricity"
+
+
+def test_classify_cold_water():
+    m = {"name": "ХВС", "resourceType": "3", "current": {"unit": "м³"}}
+    assert E.classify_meter(m) == "cold_water"
+
+
+def test_classify_hot_water():
+    m = {"name": "ГВС", "resourceType": "2", "current": {"unit": "м³"}}
+    assert E.classify_meter(m) == "hot_water"
+
+
+def test_classify_heating():
+    m = {"name": "Отопление", "resourceType": "4", "current": {"unit": "Гкал"}}
+    assert E.classify_meter(m) == "heating"
+
+
+def test_classify_unknown():
+    assert E.classify_meter({"current": {"unit": "см"}}) is None
+
+
+# ---------------------------------------------------------------------------
+# Сборка grid-каналов
+# ---------------------------------------------------------------------------
+def test_electricity_flows_both_tariffs():
+    flows = E._electricity_flows("sensor.day", "sensor.night", "sensor.base", 8.0, 4.0)
+    assert len(flows) == 2
+    assert flows[0] == {"stat_energy_from": "sensor.day", "number_energy_price": 8.0}
+    assert flows[1] == {"stat_energy_from": "sensor.night", "number_energy_price": 4.0}
+
+
+def test_electricity_flows_base_only():
+    flows = E._electricity_flows(None, None, "sensor.base", 8.0, 4.0)
+    assert len(flows) == 1
+    assert flows[0] == {"stat_energy_from": "sensor.base", "number_energy_price": 8.0}
+
+
+def test_electricity_flows_empty():
+    assert E._electricity_flows(None, None, None, 8.0, 4.0) == []
+
+
+def test_upsert_water_price_zero_adds_no_price():
+    sources = []
+    E._upsert_source(sources, "water", "sensor.a", 0.0)
+    assert sources[0]["stat_energy_from"] == "sensor.a"
+    assert "number_energy_price" not in sources[0]
+
+
+# ---------------------------------------------------------------------------
+# Принадлежность entity нашей интеграции
+# ---------------------------------------------------------------------------
+def test_is_akvilon_entity_prefix_no_registry():
+    assert E._is_akvilon_entity(None, "sensor.schetchik_kvartira_31_gvs") is True
+    assert E._is_akvilon_entity(None, "sensor.temperatura") is False
+
+
+def test_is_akvilon_entity_via_registry_platform():
+    class Ent:
+        platform = "akvilon_home"
+
+    class Reg:
+        entities = {"sensor.schetchik_x": Ent()}
+
+    assert E._is_akvilon_entity(Reg(), "sensor.schetchik_x") is True
+
+
+def test_is_akvilon_entity_foreign_platform():
+    class Ent:
+        platform = "some_other"
+
+    class Reg:
+        entities = {"sensor.chuzhoi": Ent()}
+
+    # entity в реестре, но НЕ наша платформа
+    assert E._is_akvilon_entity(Reg(), "sensor.chuzhoi") is False
