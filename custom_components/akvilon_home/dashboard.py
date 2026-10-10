@@ -2,9 +2,14 @@
 
 При setup интеграции регистрируется Lovelace-дашборд `akvilon` в сайдбаре,
 при unload — удаляется. Дашборд строится АВТОМАТИЧЕСКИ из живых данных сервера
-(камеры, калитки, домофоны, счётчики), поэтому новые устройства появляются
-сами. Также подключается custom-карточка видеодомофона (akvilon-intercom-card)
-и вкладка «Киоск» для полноэкранного режима на ТВ.
+(камеры, калитки, домофоны, счётчики), поэтому новые устройства появляются сами.
+
+Панель использует ТОЛЬКО штатные карточки Home Assistant
+(vertical-stack / picture-entity / entities / grid / tile / markdown / heading),
+без зависимостей от custom JS-карточек, поэтому работает в любом браузере и не
+ломается после обновления HA. Виды повторяют функции приложения InHome:
+Обзор / Камеры / Калитки / Счётчики / Домофон / Киоск. Пустые виды (например,
+когда домофонов на сервере 0) скрываются.
 
 Стиль карточек использует переменные активной темы Home Assistant, поэтому
 смена темы автоматически перестраивает внешний вид.
@@ -12,6 +17,7 @@
 import json
 import logging
 import os
+import time
 from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
@@ -19,13 +25,24 @@ _LOGGER = logging.getLogger(__name__)
 DASH_KEY = "lovelace.dashboard_akvilon"
 STORAGE_DIR = "/config/.storage"
 
-# Имя файла custom-карточки (кладут в /config/www/ для extra_module_url)
+# Предупреждение: custom-карточка домофона больше НЕ используется панелью.
+# Имя оставлено только для очистки ресурса, если он был установлен прежними
+# версиями интеграции.
 INTERCOM_CARD_RESOURCE = "local/akvilon/akvilon-intercom-card.js"
-WWW_RESOURCE = "/config/www/akvilon/akvilon-intercom-card.js"
-
-KIOSCK_URL = "/akvilon?kiosk"
 
 _AUTO_SUFFIX = ("_2", "_3", "_4")  # суффиксы пересозданных сущностей
+
+# Названия видов панели (для скрытия пустых и для логики пересборки)
+VIEW_OVERVIEW = "Обзор"
+VIEW_CAMERAS = "Камеры"
+VIEW_GATES = "Калитки"
+VIEW_METERS = "Счётчики"
+VIEW_INTERCOM = "Домофон"
+VIEW_KIOSK = "Киоск"
+
+# Виды, которые существуют только если найдены соответствующие сущности
+# (используется для retry-пересборки при асинхронной регистрации сущностей).
+_ENTITY_VIEWS = {VIEW_CAMERAS, VIEW_GATES, VIEW_METERS, VIEW_INTERCOM}
 
 
 def _strip_suffix(eid: str) -> str:
@@ -86,20 +103,52 @@ class _Resolver:
         return base
 
 
-def _cam_entity(cam_id: str) -> str:
-    return f"camera.kamera_{cam_id}"
+def _friendly(eid: str) -> str:
+    """Человекочитаемое короткое имя из entity_id."""
+    name = eid.split(".")[-1]
+    for pfx in (
+        "kamera_", "otkryt_kalitka_", "otkryt_domofon_",
+        "otkryt_reka_", "schetchik_", "kalitka_", "domofon_",
+    ):
+        if name.startswith(pfx):
+            name = name[len(pfx):]
+            break
+    return name.replace("_", " ").strip().title()
 
 
-def _gate_button_entity(name: str) -> str:
-    # нормализуем имя для entity_id (нижний регистр, нижние подчёркивания)
-    slug = "".join(c if c.isalnum() else "_" for c in (name or "").lower())
-    slug = "_".join([p for p in slug.split("_") if p])
-    return f"button.otkryt_{slug}"
+def _entity(entity: str, name: str = "", icon: str = "") -> dict:
+    """Стандартная ссылка на сущность для entities-карточки."""
+    cfg = {"entity": entity}
+    if name:
+        cfg["name"] = name
+    if icon:
+        cfg["icon"] = icon
+    return cfg
 
 
-def _slugify(name: str) -> str:
-    slug = "".join(c if c.isalnum() else " " for c in (name or "").lower())
-    return "_".join(slug.split())
+def _picture_camera(cam: str, title: str) -> dict:
+    return {
+        "type": "picture-entity",
+        "entity": cam,
+        "camera_view": "live",
+        "show_state": False,
+        "show_name": True,
+        "name": title,
+    }
+
+
+def _video_stack(title: str, btn: str, status: str, cam: str,
+                 open_name: str, open_icon: str) -> dict:
+    """vertical-stack (видео-панель): камера + кнопка + статус."""
+    cards = []
+    if cam:
+        cards.append(_picture_camera(cam, title))
+    items = [_entity(btn, open_name, open_icon)]
+    if status:
+        items.append(_entity(status, "Статус", "mdi:lock-open-variant"))
+    cards.append({"type": "entities", "title": title,
+                  "entities": items, "state_color": True})
+    return {"type": "vertical-stack", "cards": cards}
 
 
 def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
@@ -107,16 +156,17 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
 
     Возвращает dict вида {"version":1,"data":{"config":{"views":[...]}}}.
     Все entity_id берутся из фактической регистрации сущностей, поэтому
-    карточки указывают на реально существующие устройства (камеры, калитки,
-    домофоны, счётчики), а не на угаданные имена.
+    карточки указывают на реально существующие устройства. Виды строятся
+    ТОЛЬКО штатными карточками HA; пустые виды (нет сущностей) скрываются.
     """
     r = _Resolver(hass)
 
-    online_entity = r.resolve("binary_sensor.akvilon_server_onlain") or r.resolve("binary_sensor.server_zdaniia_onlain")
-
-    # Камеры — только НАШИ (имя начинается с «Камера ...» -> slug kamera_*).
-    # Не брать чужие camera.* других интеграций.
-    cam_ids = [c for c in r.find("camera.") if "kamera_" in c]
+    online_entity = (
+        r.resolve("binary_sensor.akvilon_server_onlain")
+        or r.resolve("binary_sensor.server_zdaniia_onlain")
+    )
+    # Только НАШИ камеры (camera.kamera_*), а не чужие интеграции.
+    cam_ids = [c for c in r.find("camera.kamera_")]
     # Кнопки калиток
     gate_btns = r.find("button.otkryt_kalitka")
     # Кнопки домофонов (включая подъездные проходы)
@@ -125,115 +175,143 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
     gate_state = r.find("sensor.kalitka")
     # Сенсоры домофонов
     dom_sensors = r.find("sensor.domofon")
-    # Счётчики
+    # Счётчики (включая тарифы День/Ночь)
     meters = r.find("sensor.schetchik")
 
-    def intercom_card(title, btn, cam=None, status=None):
-        # Стандартная карточка-видеодомофон: камера + кнопка открытия + статус.
-        # НЕ зависит от custom JS-карточки — работает в любом браузере.
-        entities = []
-        if btn:
-            entities.append(btn)
-        if status:
-            entities.append({"entity": status, "name": "Статус"})
-        cards = []
-        if cam:
-            cards.append({"type": "picture-entity", "entity": cam,
-                          "camera_view": "live", "show_state": False, "show_name": False})
-        if entities:
-            cards.append({"type": "entities", "entities": entities, "state_color": True,
-                          "title": title})
-        return {"type": "vertical-stack", "cards": cards} if cards else None
-
-    # --- Обзор ---
-    overview_cards = [{"type": "heading", "heading": "Аквилон InHome", "heading_style": "title"}]
+    # --- Обзор: заголовок + статус сервера + краткая справка ---
+    overview_cards = [
+        {"type": "heading", "heading": "Аквилон InHome", "heading_style": "title"}
+    ]
     if online_entity:
         overview_cards.append({
             "type": "grid", "grid_options": {"columns": "full"}, "cards": [
                 {"type": "tile", "entity": online_entity, "name": "Сервер здания",
                  "icon": "mdi:server-network", "vertical": False},
-            ]
+            ],
         })
-    overview_cards.append({"type": "markdown",
-        "content": "▸ **Калитки** — карточки с камерой и кнопкой «Открыть»\n"
-                   "▸ **Домофоны** — полноэкранный видеодомофон (Ответить/Открыть)\n"
-                   "▸ **Камеры** — все камеры двора и подъездов\n"
-                   "▸ **Счётчики** — ГВС, ХВС, отопление, электричество (День/Ночь)",
-        "grid_options": {"columns": "full"}})
+    summary = []
+    if cam_ids:
+        summary.append(f"▸ **Камеры** — {len(cam_ids)} камер")
+    if gate_btns:
+        summary.append(f"▸ **Калитки** — {len(gate_btns)} кнопок открытия")
+    if meters:
+        summary.append(f"▸ **Счётчики** — {len(meters)} показаний")
+    if dom_btns:
+        summary.append(f"▸ **Домофон** — {len(dom_btns)} панелей вызова")
+    if summary:
+        overview_cards.append({
+            "type": "markdown",
+            "content": "\n".join(summary),
+            "grid_options": {"columns": "full"},
+        })
 
-    # --- Калитки: карточка домофона (кнопка + статус + камера, если найдена) ---
+    # --- Калитки: кнопка + статус (и камера, если найдена) ---
     gate_cards = []
     used_status = set()
     for btn in gate_btns:
         core = btn.split("button.otkryt_kalitka_")[-1]
         status = next((s for s in gate_state if core in s), "")
         cam = next((c for c in cam_ids if core in c), "")
-        gate_cards.append(intercom_card(f"Калитка {core}", btn, cam, status))
+        gate_cards.append(_video_stack(
+            f"Калитка {core}", btn, status, cam,
+            "Открыть", "mdi:door-open"))
         if status:
             used_status.add(status)
     # Калитки, у которых нет отдельной кнопки, но есть сенсор состояния
     for s in gate_state:
         if s not in used_status:
             gate_cards.append({"type": "entities",
-                               "entities": [{"entity": s, "name": s.split("_")[-1]}],
+                               "entities": [_entity(s, _friendly(s))],
                                "state_color": True})
 
-    # --- Домофоны (полноэкранные карточки) ---
+    # --- Домофон: видео-панели (камера + кнопка + статус) ---
     dom_cards = []
     for btn in dom_btns:
-        key = btn.split("button.otkryt_")[-1]           # напр. domofon_kalitka_14
-        status = next((s for s in dom_sensors if (key.replace("domofon_", "") in s)), "")
-        cam = next((c for c in cam_ids if key.replace("domofon_", "") in c), "")
-        title = key.replace("domofon_", "").replace("_", " ").title()
-        dom_cards.append(intercom_card(title, btn, cam, status))
+        key = btn.split("button.otkryt_")[-1]
+        core = key.replace("domofon_", "").replace("reka_", "")
+        status = next((s for s in dom_sensors if core in s), "")
+        cam = next((c for c in cam_ids if core in c), "")
+        title = core.replace("_", " ").title() or "Домофон"
+        dom_cards.append(_video_stack(
+            title, btn, status, cam,
+            "Открыть", "mdi:door-bell"))
 
     # --- Камеры ---
-    cam_cards = [{"type": "picture-entity", "entity": c, "camera_view": "live",
-                  "show_state": False, "show_name": True, "name": c.split(".")[-1]}
-                 for c in cam_ids]
+    cam_cards = [_picture_camera(c, _friendly(c)) for c in cam_ids]
 
     # --- Счётчики ---
-    meter_cards = [{"type": "tile", "entity": m, "name": m.split(".")[-1],
+    meter_cards = [{"type": "tile", "entity": m, "name": _friendly(m),
                     "icon": "mdi:counter"} for m in meters]
 
-    views = [
-        {"type": "sections", "title": "Обзор", "path": "overview",
-         "sections": [{"type": "grid", "cards": overview_cards}]},
-        {"type": "sections", "title": "Калитки", "path": "gates",
-         "sections": [{"type": "grid", "cards": [
-             {"type": "heading", "heading": "Калитки", "heading_style": "title"},
-         ] + (gate_cards or [{"type": "markdown", "content": "Калитки не найдены."}])}]},
-        {"type": "sections", "title": "Домофоны", "path": "intercoms",
-         "sections": [{"type": "grid", "cards": [
-             {"type": "heading", "heading": "Домофоны", "heading_style": "title"},
-         ] + (dom_cards or [{"type": "markdown", "content": "Домофоны не найдены."}])}]},
-        {"type": "sections", "title": "Камеры", "path": "cameras",
-         "sections": [{"type": "grid", "cards": [
-             {"type": "heading", "heading": "Камеры", "heading_style": "title"},
-         ] + cam_cards}]},
-        {"type": "sections", "title": "Счётчики", "path": "meters",
-         "sections": [{"type": "grid", "cards": [
-             {"type": "heading", "heading": "Счётчики", "heading_style": "title"},
-         ] + meter_cards}]},
-        {"type": "sections", "title": "Киоск", "path": "kiosk",
-         "sections": [{"type": "grid", "cards": [
-             {"type": "markdown",
-              "content": "**Киоск-режим для ТВ**\n\nПолноэкранный интерфейс для телевизора. Карточки калиток/домофонов открывают видеодомофон на весь экран.",
-              "grid_options": {"columns": "full"}},
-         ]}]},
-    ]
+    # --- Киоск: крупные кнопки открытия калиток для планшета ---
+    kiosk_cards = [{"type": "tile", "entity": btn, "name": f"Открыть {_friendly(btn)}",
+                    "icon": "mdi:door-open", "vertical": False}
+                   for btn in gate_btns]
+
+    def _view(title: str, path: str, heading: str, cards: list) -> dict:
+        return {
+            "type": "sections", "title": title, "path": path,
+            "sections": [{"type": "grid", "cards": [
+                {"type": "heading", "heading": heading, "heading_style": "title"},
+            ] + cards}],
+        }
+
+    views = [_view(VIEW_OVERVIEW, "overview", "Аквилон InHome", overview_cards)]
+
+    # Пустые виды не добавляются.
+    if cam_cards:
+        views.append(_view(VIEW_CAMERAS, "cameras", "Камеры", cam_cards))
+    if gate_cards:
+        views.append(_view(VIEW_GATES, "gates", "Калитки", gate_cards))
+    if meter_cards:
+        views.append(_view(VIEW_METERS, "meters", "Счётчики", meter_cards))
+    if dom_cards:
+        views.append(_view(VIEW_INTERCOM, "intercom", "Домофон", dom_cards))
+    if kiosk_cards:
+        views.append(_view(VIEW_KIOSK, "kiosk", "Киоск", kiosk_cards))
 
     return {"version": 1, "minor_version": 1, "key": DASH_KEY,
             "data": {"config": {"views": views}}}
 
 
-def ensure_dashboard(hass: Any = None, hub=None):
-    """Создаёт и регистрирует дашборд «Аквилон» (пересобирает, если он устарел)."""
+def _views_titles(payload: dict) -> set:
+    """Множество заголовков видов внутри payload (для проверки пустоты)."""
+    titles = set()
     try:
-        payload = build_dashboard_payload(hass, hub)
-    except Exception as exc:  # pragma: no cover
-        _LOGGER.warning("Аквилон: не удалось построить дашборд: %s", exc)
-        return
+        for v in payload["data"]["config"]["views"]:
+            t = v.get("title")
+            if t:
+                titles.add(t)
+    except Exception:
+        pass
+    return titles
+
+
+def ensure_dashboard(hass: Any = None, hub=None, retries: int = 3, delay: float = 2.0):
+    """Создаёт и регистрирует дашборд «Аквилон».
+
+    Сущности регистрируются в Home Assistant асинхронно, поэтому на первом
+    вызове резолвер может не увидеть ни одной сущности (пустая панель из одного
+    «Обзора»). Панель пересобирается с паузами (обычно в executor-потоке), пока
+    не найдёт хотя бы один вид с сущностями. Если retries исчерпаны — оставляем
+    последний результат (не блокируя загрузку HA).
+    """
+    payload = None
+    for attempt in range(max(1, retries)):
+        try:
+            payload = build_dashboard_payload(hass, hub)
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.warning("Аквилон: не удалось построить дашборд: %s", exc)
+            return
+        if _views_titles(payload) & _ENTITY_VIEWS:
+            break
+        if attempt < retries - 1:
+            _LOGGER.info(
+                "Аквилон: сущности ещё не зарегистрированы, повтор пересборки "
+                "дашборда через %.1fс (попытка %d/%d)",
+                delay, attempt + 2, retries,
+            )
+            time.sleep(delay)
     # Пишем файл дашборда
     try:
         os.makedirs(STORAGE_DIR, exist_ok=True)
@@ -280,47 +358,6 @@ def _register_dashboard():
         _LOGGER.info("Аквилон: дашборд зарегистрирован в lovelace_dashboards")
     except Exception as exc:  # pragma: no cover
         _LOGGER.warning("Аквилон: не удалось зарегистрировать дашборд: %s", exc)
-
-
-def _install_resource():
-    """Копирует custom-карточку домофона в /config/www/ и регистрирует resource."""
-    # 1) файл JS
-    try:
-        os.makedirs(os.path.dirname(WWW_RESOURCE), exist_ok=True)
-        js_path = os.path.join(os.path.dirname(__file__), "dashboard",
-                               "akvilon-intercom-card.js")
-        if not os.path.exists(js_path):
-            # если интеграция не в custom_components, пробуем рядом
-            js_path = os.path.join(os.path.dirname(__file__),
-                                   "akvilon-intercom-card.js")
-        if os.path.exists(js_path):
-            with open(js_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            with open(WWW_RESOURCE, "w", encoding="utf-8") as f:
-                f.write(content)
-            _LOGGER.info("Аквилон: custom-карточка установлена в /config/www/akvilon/")
-    except Exception as exc:  # pragma: no cover
-        _LOGGER.warning("Аквилон: не удалось установить JS-ресурс: %s", exc)
-
-    # 2) регистрируем в lovelace_resources
-    try:
-        res_path = os.path.join(STORAGE_DIR, "lovelace_resources")
-        res = {"version": 1, "minor_version": 1,
-               "key": "lovelace_resources", "data": {"items": []}}
-        if os.path.exists(res_path):
-            try:
-                res = json.load(open(res_path))
-            except Exception:
-                res = {"version": 1, "minor_version": 1,
-                       "key": "lovelace_resources", "data": {"items": []}}
-            res.setdefault("data", {}).setdefault("items", [])
-        items = res["data"]["items"]
-        if not any(i.get("url") == f"/{INTERCOM_CARD_RESOURCE}" for i in items):
-            items.append({"type": "js", "url": f"/{INTERCOM_CARD_RESOURCE}"})
-            json.dump(res, open(res_path, "w"), ensure_ascii=False)
-            _LOGGER.info("Аквилон: JS-ресурс %s зарегистрирован", INTERCOM_CARD_RESOURCE)
-    except Exception as exc:  # pragma: no cover
-        _LOGGER.warning("Аквилон: не удалось зарегистрировать JS-ресурс: %s", exc)
 
 
 def remove_dashboard(hass: Any = None):
