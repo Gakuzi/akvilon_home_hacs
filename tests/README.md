@@ -31,6 +31,7 @@
 | `coordinator.py` | демо-данные, фильтр `selected`, поиск/связка камер-калиток-домофонов, кэш настроек |
 | `viewer.py` | классификация камер по разделам, HTTP-роутинг `/`, `/snap/`, `/mjpeg/`, 404 |
 | `sensor.py` | `_normalize_unit`, `_meter_current`, `_meter_value` |
+| `dashboard.py` | `build_dashboard_payload` с фейковым резолвером: 6 видов, только `camera.kamera_*`, нет custom-карточек, скрытие пустых видов, `_views_titles` |
 
 Покрытие по сетевым-независимым модулям: **≥ 60%** (порог в `tests/.coveragerc`,
 проверяется в CI и в `run_coverage.sh`).
