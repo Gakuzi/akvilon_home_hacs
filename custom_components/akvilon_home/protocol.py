@@ -673,7 +673,8 @@ class AkvilonClient:
         payload = json.dumps({"id": str(cam_id), "name": "openCamera"},
                              separators=(",", ":")).encode("utf-8")
         self.sock.sendto(self._build(CMD_EVENT, 0x00, 0x30401, payload,
-                                     state_number=self._next_seq()),
+                                     state_number=self._next_seq(),
+                                     state_time=int(time.time() * 1000)),
                          (self.host, self.port))
         target = str(cam_id)
         # Собираем ВСЕ входящие JSON-пакеты после запроса ищем объект с videoPort

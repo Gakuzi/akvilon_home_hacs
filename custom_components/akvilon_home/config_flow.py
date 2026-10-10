@@ -76,6 +76,13 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 "_PASS": params.get("PASS", ""),
                 "connection_string": qr,
             }
+            # Уникальный идентификатор по DEVICE_ID+HOST: при повторной настройке
+            # HA перенастроит существующий entry, а не создаст новый (иначе плодит
+            # дубли entity с суффиксами _2, _3...).
+            await self.async_set_unique_id(
+                f"{params['DEVICE_ID']}@{params['HOST']}"
+            )
+            self._abort_if_unique_id_configured()
             # Ключ распознан — переходим к проверке соединения и загрузке
             return await self.async_step_check()
 
