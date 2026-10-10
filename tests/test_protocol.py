@@ -34,7 +34,7 @@ from akvilon_home.protocol import (
 class TestParseQr:
     def test_full_realistic_qr(self):
         qr = (
-            "CLEVERB;CODE;71825;VERSION;3;DEVICEID;0:0;"
+            "CLEVERB;CODE;00000;VERSION;3;DEVICEID;0:0;"
             "PASS;a1b2c3d4;UDP;127.0.0.1;19090;SERVERID;0:0;SUID;cafebabe"
         )
         out = parse_qr(qr)

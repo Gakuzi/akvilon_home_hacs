@@ -74,7 +74,7 @@ def parse_qr(qr: str) -> dict:
     """Разбирает QR-строку подключения Аквилон (формат застройщика).
 
     Поддерживает два разделителя: 'КЛЮЧ=ЗНАЧЕНИЕ' и пары 'КЛЮЧ;ЗНАЧЕНИЕ'
-    (как в реальной строке: CLEVERB;CODE;71825;VERSION;3;DEVICEID;0:0;
+    (как в реальной строке: CLEVERB;CODE;00000;VERSION;3;DEVICEID;0:0;
     PASS;PASS_PLACEHOLDER;UDP;127.0.0.1;19090;SERVERID;0:0;SUID;deadbeef...).
     Возвращает dict: HOST, PORT, DEVICE_ID, SERVER_ID, PASS (str), SUID, TOKEN(bytes).
     """
