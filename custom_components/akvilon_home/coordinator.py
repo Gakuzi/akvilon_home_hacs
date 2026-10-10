@@ -37,6 +37,8 @@ class AkvilonHub:
         self._video_settings = {}  # cam_id -> dict(videoPort, videoHost, videoToken, sprop)
         self._last_ok = 0.0  # monotonic метка последнего успешного опроса сервера
         self._last_count = 0
+        self._online = False  # запасной онлайн-признак (по refresh)
+        self.last_refresh_error = None
         self.selected: list[str] | None = None  # None = все
 
     def _new_client(self) -> AkvilonClient:
@@ -91,6 +93,7 @@ class AkvilonHub:
             g for g in self._gates if str(g.get("cameraId") or "").strip() not in ("", "0:-1")
         ]
         self._last_ok = time.monotonic()
+        self._online = True
         _LOGGER.info(
             "Аквилон: демо-режим: камер=%d, калиток=%d, счётчиков=%d, домофонов=%d",
             len(self._cams), len(self._gates), len(self._meters), len(self._intercoms),
@@ -99,49 +102,76 @@ class AkvilonHub:
     def refresh(self):
         """Получает свежие списки камер/калиток/счётчиков с сервера.
 
+        УСТОЙЧИВО: метод никогда не бросает исключение — каждый банк оборачивается
+        в try/except, а неуспех лишь логируется. `self._last_ok` обновляется ТОЛЬКО
+        при реальном получении данных от сервера, поэтому сенсор «_last_ok» не
+        врёт об онлайне при падении банка. Возвращает bool: получили ли хоть
+        какой-то банк (для онлайн-статуса).
+
         Домофоны отдельным каналом НЕ существуют (0x10403 пуст — проверено).
         Домофон = калитка/вход, у которой проставлен cameraId («калитка+камера»).
         Поэтому после загрузки калиток мы собираем intercoms из _gates.
         """
         if self.demo:
-            return  # демо-режим: данные уже заполнены через load_demo_data
-        for key, ch in (
-            ("cameras", CH_CAMERAS),
-            ("gates", CH_GATES),
-            ("meters", CH_METERS),
-        ):
-            cl = self._new_client()
-            try:
-                # ВАЖНО: НЕ вызываем subscribe()/register() для получения списков.
-                # register() портит UDP-сессию: сервер начинает отвечать flag=0x82
-                # (ERR) на GET, и камеры не приходят. Подписи PASS в пакетах достаточно.
-                self._last_ok = time.monotonic()
-                time.sleep(0.5)
-                # Камеры вытягиваются поштучно с паузой (см. protocol.get_list),
-                # поэтому большой таймаут — чтобы успеть собрать все id.
-                tmo = 70 if key == "cameras" else 40
-                objs = cl.get_list(ch, timeout=tmo)
-                if key == "cameras":
-                    self._cams = objs
-                elif key == "gates":
-                    self._gates = objs
-                else:
-                    self._meters = objs
-                self._last_count = cl.last_list_count
-            except Exception as exc:  # pragma: no cover
-                _LOGGER.warning("Аквилон: банк %s не получен: %s", key, exc)
-            finally:
-                cl._running = False
-                cl.close()
-        # Домофоны = калитки/входы с реальной привязкой к камере (cameraId != 0:-1)
-        self._intercoms = [
-            g for g in self._gates
-            if str(g.get("cameraId") or "").strip() not in ("", "0:-1")
-        ]
-        _LOGGER.info(
-            "Аквилон: обновлено камер=%d, калиток=%d, счётчиков=%d, домофонов=%d",
-            len(self._cams), len(self._gates), len(self._meters), len(self._intercoms),
-        )
+            self._online = True
+            return True  # демо-режим: данные уже заполнены через load_demo_data
+        self.last_refresh_error = None
+        got_any = False
+        try:
+            for key, ch in (
+                ("cameras", CH_CAMERAS),
+                ("gates", CH_GATES),
+                ("meters", CH_METERS),
+            ):
+                cl = self._new_client()
+                try:
+                    # ВАЖНО: НЕ вызываем subscribe()/register() для получения списков.
+                    # register() портит UDP-сессию: сервер начинает отвечать flag=0x82
+                    # (ERR) на GET, и камеры не приходят. Подписи PASS достаточно.
+                    time.sleep(0.5)
+                    # Камеры вытягиваются поштучно с паузой (см. protocol.get_list),
+                    # поэтому большой таймаут — чтобы успеть собрать все id.
+                    tmo = 70 if key == "cameras" else 40
+                    objs = cl.get_list(ch, timeout=tmo)
+                    if cl._last_rx > 0:
+                        # сервер реально что-то прислал — это признак онлайна
+                        self._last_ok = time.monotonic()
+                        self._online = True
+                        got_any = True
+                    if key == "cameras":
+                        self._cams = objs
+                    elif key == "gates":
+                        self._gates = objs
+                    else:
+                        self._meters = objs
+                    self._last_count = cl.last_list_count
+                except Exception as exc:  # pragma: no cover
+                    self.last_refresh_error = exc
+                    _LOGGER.warning("Аквилон: банк %s не получен: %s", key, exc)
+                finally:
+                    cl._running = False
+                    cl.close()
+            # Домофоны = калитки/входы с реальной привязкой к камере (cameraId != 0:-1)
+            self._intercoms = [
+                g for g in self._gates
+                if str(g.get("cameraId") or "").strip() not in ("", "0:-1")
+            ]
+            _LOGGER.info(
+                "Аквилон: обновлено камер=%d, калиток=%d, счётчиков=%d, домофонов=%d",
+                len(self._cams), len(self._gates), len(self._meters), len(self._intercoms),
+            )
+        except Exception as exc:  # pragma: no cover
+            # нижний предохранитель: refresh никогда не роняет setup_entry
+            self.last_refresh_error = exc
+            _LOGGER.warning("Аквилон: refresh прерван: %s", exc)
+        if not got_any:
+            self._online = False
+        return got_any
+
+    @property
+    def is_online(self) -> bool:
+        """Онлайн ли сервер по последнему refresh (запасной признак)."""
+        return bool(self._online)
 
     def _is_selected(self, obj_id: str) -> bool:
         if self.selected is None:
