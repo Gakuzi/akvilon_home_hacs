@@ -15,6 +15,16 @@
         "description": "Проверяю соединение с сервером и загружаю данные...",
         "data": {}
       },
+      "tariffs": {
+        "title": "Тарифы и энергия",
+        "description": "{note}",
+        "data": {
+          "electricity_tariff_day": "Электричество (день), руб/кВт·ч",
+          "electricity_tariff_night": "Электричество (ночь), руб/кВт·ч",
+          "cold_water_tariff": "Холодная вода, руб/м³",
+          "hot_water_tariff": "Горячая вода, руб/м³"
+        }
+      },
       "reconfigure": {
         "title": "Переподключить",
         "description": "Вставьте новую строку подключения для перенастройки.",

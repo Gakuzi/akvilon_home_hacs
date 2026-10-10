@@ -12,7 +12,10 @@ from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    camera_dev_id,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +42,13 @@ class AkvilonCamera(Camera):
         self.cam_id = cam_id
         self._name = name
         self._attr_unique_id = f"{DOMAIN}_cam_{cam_id.replace(':', '_')}"
+        # Привязка к устройству «Камера <имя>»
+        self._attr_device_info = {
+            "identifiers": {camera_dev_id(cam_id)},
+            "name": f"Камера {self._name}",
+            "manufacturer": "Аквилон InHome",
+            "model": "IP-камера ЖК Reka",
+        }
 
     @property
     def name(self):

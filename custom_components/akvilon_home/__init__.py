@@ -124,10 +124,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as exc:  # pragma: no cover
             _LOGGER.warning("Аквилон: первичная загрузка данных не удалась: %s", exc)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-        # Создаём/обновляем дашборд «Аквилон» после появления сущностей.
+        # Авто-запуск веб-панели камер (viewer) на порту 8090 — чтобы панель
+        # сразу работала после настройки, без ручного сервиса start_viewer.
+        try:
+            if entry.data.get("start_viewer", True):
+                v = ViewerServer(hub, port=8090, refresh=12)
+                await hass.async_add_executor_job(v._start)
+                hass.data.setdefault("akvilon_viewers", {})[entry.entry_id] = v
+                _LOGGER.info("Аквилон: веб-панель камер авто-запущена на порту 8090")
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.warning("Аквилон: не удалось авто-запустить viewer: %s", exc)
+        # Интегрируем счётчики в «Энергию» (после создания сущностей).
+        try:
+            from .energy import async_setup_energy
+            await async_setup_energy(hass, entry)
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.warning("Аквилон: не удалось настроить энергосистему: %s", exc)
+        # Создаём/обновляем дашборд «Аквилон». Сущности регистрируются асинхронно,
+        # поэтому пересобираем панель несколько раз с паузой, чтобы успеть собрать
+        # реальные entity_id (иначе первый запуск видит пустой registry).
         try:
             from .dashboard import ensure_dashboard
             await hass.async_add_executor_job(ensure_dashboard, hass, hub)
+            for _ in range(3):
+                await asyncio.sleep(2)
+                await hass.async_add_executor_job(ensure_dashboard, hass, hub)
         except Exception as exc:  # pragma: no cover
             _LOGGER.warning("Аквилон: не удалось настроить дашборд: %s", exc)
 

@@ -114,8 +114,9 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
 
     online_entity = r.resolve("binary_sensor.akvilon_server_onlain") or r.resolve("binary_sensor.server_zdaniia_onlain")
 
-    # Камеры — все camera.*
-    cam_ids = r.find("camera.")
+    # Камеры — только НАШИ (имя начинается с «Камера ...» -> slug kamera_*).
+    # Не брать чужие camera.* других интеграций.
+    cam_ids = [c for c in r.find("camera.") if "kamera_" in c]
     # Кнопки калиток
     gate_btns = r.find("button.otkryt_kalitka")
     # Кнопки домофонов (включая подъездные проходы)
@@ -128,14 +129,21 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
     meters = r.find("sensor.schetchik")
 
     def intercom_card(title, btn, cam=None, status=None):
-        return {
-            "type": "custom:akvilon-intercom-card",
-            "title": title,
-            "gate_button": btn,
-            "camera_entity": cam or "",
-            "status_sensor": status or "",
-            "show_fullscreen_button": True,
-        }
+        # Стандартная карточка-видеодомофон: камера + кнопка открытия + статус.
+        # НЕ зависит от custom JS-карточки — работает в любом браузере.
+        entities = []
+        if btn:
+            entities.append(btn)
+        if status:
+            entities.append({"entity": status, "name": "Статус"})
+        cards = []
+        if cam:
+            cards.append({"type": "picture-entity", "entity": cam,
+                          "camera_view": "live", "show_state": False, "show_name": False})
+        if entities:
+            cards.append({"type": "entities", "entities": entities, "state_color": True,
+                          "title": title})
+        return {"type": "vertical-stack", "cards": cards} if cards else None
 
     # --- Обзор ---
     overview_cards = [{"type": "heading", "heading": "Аквилон InHome", "heading_style": "title"}]
@@ -234,8 +242,6 @@ def ensure_dashboard(hass: Any = None, hub=None):
         _LOGGER.warning("Аквилон: не удалось записать дашборд-файл: %s", exc)
     # Регистрируем в lovelace_dashboards
     _register_dashboard()
-    # Подключаем custom-карточку (копируем JS в /config/www/)
-    _install_resource()
 
 
 def _storage_path():

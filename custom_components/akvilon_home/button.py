@@ -5,7 +5,11 @@ from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    gate_dev_id,
+    intercom_dev_id,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +36,13 @@ class AkvilonGateButton(ButtonEntity):
         self.gate_id = str(gate_id)
         self._name = name
         self._attr_unique_id = f"{DOMAIN}_gate_{self.gate_id.replace(':', '_')}"
+        # Привязка к устройству «Калитка <имя>»
+        self._attr_device_info = {
+            "identifiers": {gate_dev_id(self.gate_id)},
+            "name": f"Калитка {self._name}",
+            "manufacturer": "Аквилон InHome",
+            "model": "Калитка / вход",
+        }
 
     @property
     def name(self):
@@ -70,6 +81,13 @@ class AkvilonIntercomButton(ButtonEntity):
         self.intercom_id = str(intercom_id)
         self._name = name
         self._attr_unique_id = f"{DOMAIN}_intercom_open_{self.intercom_id.replace(':', '_')}"
+        # Привязка к устройству «Домофон <имя>» (тот же device, что у камеры и статуса)
+        self._attr_device_info = {
+            "identifiers": {intercom_dev_id(self.intercom_id)},
+            "name": f"Домофон {self._name}",
+            "manufacturer": "Аквилон InHome",
+            "model": "Домофон / калитка с камерой",
+        }
 
     @property
     def name(self):
@@ -101,9 +119,12 @@ async def async_setup_entry(
     """Создаёт кнопки калиток и домофонов из живого списка сервера."""
     hub = hass.data[DOMAIN][entry.entry_id]
     entities = []
+    # Аналогично sensor.py: калитки, являющиеся домофонами (с камерой), получают
+    # только кнопку домофона; обычные калитки — кнопку калитки (без дублей).
+    intercom_ids = set(str(i.get("objectid") or i.get("objectId") or "") for i in hub.intercoms)
     for g in hub.gates:
         gid = _gate_id(g)
-        if gid:
+        if gid and gid not in intercom_ids:
             entities.append(AkvilonGateButton(hub, gid, _gate_name(g)))
     for ic in hub.intercoms:
         iid = _gate_id(ic)

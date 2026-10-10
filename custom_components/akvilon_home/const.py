@@ -104,3 +104,31 @@ METERS = [
 SIGN_START = 0x2E
 SIGN_LEN = 0x12
 GATE_OPEN_DELAY = 5
+
+
+def _devid(kind: str, oid: str) -> tuple:
+    """Стабильный identifier устройства: (DOMAIN, <kind>, <oid>).
+    kind: server|camera|gate|intercom|meter.
+    """
+    oid = str(oid or "").strip() or "unknown"
+    return (DOMAIN, kind, oid)
+
+
+def server_dev_id() -> tuple:
+    return _devid("server", "1")
+
+
+def camera_dev_id(cam_id) -> tuple:
+    return _devid("camera", cam_id)
+
+
+def gate_dev_id(gate_id) -> tuple:
+    return _devid("gate", gate_id)
+
+
+def intercom_dev_id(ic_id) -> tuple:
+    return _devid("intercom", ic_id)
+
+
+def meter_dev_id(device_number) -> tuple:
+    return _devid("meter", device_number)

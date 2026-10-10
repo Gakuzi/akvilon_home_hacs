@@ -9,7 +9,10 @@ from homeassistant.components.binary_sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    server_dev_id,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,6 +34,13 @@ class AkvilonOnlineSensor(BinarySensorEntity):
     def __init__(self, hub):
         self._hub = hub
         self._attr_unique_id = f"{DOMAIN}_server_online_1"
+        # Привязка к устройству «Сервер здания»
+        self._attr_device_info = {
+            "identifiers": {server_dev_id()},
+            "name": "Сервер здания",
+            "manufacturer": "Аквилон InHome",
+            "model": "UDP-сервер ЖК Reka",
+        }
 
     @property
     def name(self):

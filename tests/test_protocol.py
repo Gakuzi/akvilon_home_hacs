@@ -347,3 +347,61 @@ class TestCameraMethods:
         sent, _ = cl.sock.sent[0]
         ch = struct.unpack_from("<I", sent, 0x38)[0]
         assert ch == 0x200
+
+    def test_subscribe_sends_sub_channels(self):
+        cl = _make_client()
+        resp_hdr = bytearray(64)
+        resp_hdr[0x36] = P.CMD_EVENT
+        resp_hdr[0x37] = P.FLAG_OK
+        cl.sock = _FakeSock(responses=[bytes(resp_hdr) + b"\x00" * 16])
+        r = cl.subscribe()
+        assert r is not None
+        sent, _ = cl.sock.sent[0]
+        ch = struct.unpack_from("<I", sent, 0x38)[0]
+        assert ch == 0x200
+        # payload содержит количество каналов == число SUB_CHANNELS
+        payload = sent[HEADER_LEN:-MD5_LEN]
+        cnt = struct.unpack_from("<I", payload, 0)[0]
+        assert cnt == len(P.SUB_CHANNELS)
+
+    def test_register_sends_initial_channel(self):
+        cl = _make_client()
+        resp_hdr = bytearray(64)
+        resp_hdr[0x36] = P.CMD_EVENT
+        resp_hdr[0x37] = P.FLAG_OK
+        cl.sock = _FakeSock(responses=[bytes(resp_hdr) + b"\x00" * 16])
+        r = cl.register()
+        assert r is not None
+        sent, _ = cl.sock.sent[0]
+        ch = struct.unpack_from("<I", sent, 0x38)[0]
+        assert ch == 0x02020001
+        payload = sent[HEADER_LEN:-MD5_LEN]
+        assert b"inHome" in payload
+
+    def test_get_list_payload_lengths(self):
+        # Проверка всех веток get_list_payload (req_type=1 и =2)
+        p1 = bytes(P.get_list_payload(1, -1, 0, 0))
+        assert len(p1) == 32
+        t1 = struct.unpack_from("<I", p1, 0)[0]
+        assert t1 == 1
+        p2 = bytes(P.get_list_payload(2, 101967, 3, 5))
+        assert len(p2) == 32
+        t2 = struct.unpack_from("<I", p2, 0)[0]
+        assert t2 == 2
+        oid = struct.unpack_from("<q", p2, 4)[0]
+        assert oid == 101967
+
+    def test_channel_queue_creates_and_reuses(self):
+        cl = _make_client()
+        # первое обращение создаёт очередь
+        q1 = cl._channel_queue(0x10401)
+        assert q1 is not None
+        # повторное обращение возвращает ту же очередь
+        q2 = cl._channel_queue(0x10401)
+        assert q2 is q1
+
+    def test_header_count_and_is_header(self):
+        cl = _make_client()
+        recs = [(101967, 2), (101968, 3)]
+        pkt = _header_packet(0x10401, 2, recs)
+        assert cl._header_count(pkt) == 2

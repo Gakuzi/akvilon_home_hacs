@@ -5,7 +5,12 @@ from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    meter_dev_id,
+    gate_dev_id,
+    intercom_dev_id,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +53,7 @@ class AkvilonMeterSensor(SensorEntity):
     """Показание прибора учёта (счётчика) квартиры."""
 
     _attr_has_entity_name = False
+    _attr_state_class = "total_increasing"
 
     def __init__(self, meter: dict):
         self.meter = meter
@@ -56,6 +62,13 @@ class AkvilonMeterSensor(SensorEntity):
         self._attr_unique_id = f"{DOMAIN}_meter_{dn}"
         self._label = name
         self._device_number = dn
+        # Привязка к устройству «Счётчик <название>»
+        self._attr_device_info = {
+            "identifiers": {meter_dev_id(dn)},
+            "name": f"Счётчик {name}",
+            "manufacturer": "Аквилон InHome",
+            "model": "Прибор учёта квартиры",
+        }
 
     @property
     def name(self):
@@ -126,6 +139,13 @@ class AkvilonMeterTariffSensor(SensorEntity):
         self._device_number = dn
         self._attr_unique_id = f"{DOMAIN}_meter_{dn}_tariff{tariff_index}"
         self._tariff_number = tariff_index + 1
+        # Тот же device, что и основной счётчик (для Энергии: Т1/Т2 на одном приборе)
+        self._attr_device_info = {
+            "identifiers": {meter_dev_id(dn)},
+            "name": f"Счётчик {(meter.get('name') or 'Счётчик')}",
+            "manufacturer": "Аквилон InHome",
+            "model": "Прибор учёта квартиры",
+        }
 
     @property
     def name(self):
@@ -172,6 +192,13 @@ class AkvilonGateSensor(SensorEntity):
         self.gate_id = str(gate_id)
         self._name = name
         self._attr_unique_id = f"{DOMAIN}_gatestate_{self.gate_id.replace(':', '_')}"
+        # Привязка к устройству «Калитка <имя>»
+        self._attr_device_info = {
+            "identifiers": {gate_dev_id(self.gate_id)},
+            "name": f"Калитка {self._name}",
+            "manufacturer": "Аквилон InHome",
+            "model": "Калитка / вход",
+        }
 
     @property
     def name(self):
@@ -223,6 +250,13 @@ class AkvilonIntercomSensor(SensorEntity):
         self.intercom_id = str(intercom_id)
         self._name = name
         self._attr_unique_id = f"{DOMAIN}_intercom_{self.intercom_id.replace(':', '_')}"
+        # Привязка к устройству «Домофон <имя>»
+        self._attr_device_info = {
+            "identifiers": {intercom_dev_id(self.intercom_id)},
+            "name": f"Домофон {self._name}",
+            "manufacturer": "Аквилон InHome",
+            "model": "Домофон / калитка с камерой",
+        }
 
     @property
     def name(self):
@@ -269,9 +303,13 @@ async def async_setup_entry(
         if isinstance(vals, list) and len(vals) >= 2:
             sens.append(AkvilonMeterTariffSensor(m, 0, "День"))
             sens.append(AkvilonMeterTariffSensor(m, 1, "Ночь"))
+    # Домофоны (intercoms) — подмножество калиток (gates с cameraId). Чтобы не
+    # плодить дубли «калитка+домофон» на одну дверь, создаём для двери с камерой
+    # ТОЛЬКО домофон, а для обычной калитки (без камеры) — калитку.
+    intercom_ids = set(str(i.get("objectid") or i.get("objectId") or "") for i in hub.intercoms)
     for g in hub.gates:
         gid = str(g.get("objectid") or g.get("objectId") or "")
-        if gid:
+        if gid and gid not in intercom_ids:
             sens.append(AkvilonGateSensor(hub, gid, g.get("name") or "Калитка"))
     for ic in hub.intercoms:
         iid = str(ic.get("objectid") or ic.get("objectId") or "")

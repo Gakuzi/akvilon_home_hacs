@@ -30,6 +30,12 @@ from .const import (
     DEFAULT_NAME,
 )
 from .protocol import parse_qr
+from .energy import (
+    DEFAULT_EL_DAY,
+    DEFAULT_EL_NIGHT,
+    DEFAULT_WATER_COLD,
+    DEFAULT_WATER_HOT,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,6 +55,7 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         self._params = {}
+        self._devices = []
 
     # ------------------------------------------------------------------
     # Шаг 1: ввод ключа
@@ -120,13 +127,8 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         if not devices:
             return await self._abort_or_form("no_devices")
 
-        data = dict(self._params)
-        data["selected"] = [d["id"] for d in devices]
-        data["devices"] = devices
-        data["create_dashboard"] = True
-        data["add_to_energy"] = True
-        title = self._params.get(CONF_NAME) or DEFAULT_NAME
-        return self.async_create_entry(title=title, data=data)
+        self._devices = devices
+        return await self.async_step_tariffs()
 
     async def _abort_or_form(self, code: str) -> FlowResult:
         # Показываем понятную ошибку на шаге проверки
@@ -134,6 +136,60 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="check",
             data_schema=vol.Schema({}),
             errors={"base": code},
+        )
+
+    # ------------------------------------------------------------------
+    # Шаг 3: тарифы (Энергия) — Архангельск по умолчанию, можно изменить
+    # ------------------------------------------------------------------
+    async def async_step_tariffs(self, user_input: dict | None = None) -> FlowResult:
+        errors: dict[str, str] = {}
+        has_meters = any(d.get("type") == "meter" for d in self._devices)
+
+        if user_input is not None:
+            data = dict(self._params)
+            data["selected"] = [d["id"] for d in self._devices]
+            data["devices"] = self._devices
+            data["create_dashboard"] = True
+            data["add_to_energy"] = True
+            data["electricity_tariff_day"] = user_input.get("electricity_tariff_day", DEFAULT_EL_DAY)
+            data["electricity_tariff_night"] = user_input.get("electricity_tariff_night", DEFAULT_EL_NIGHT)
+            data["cold_water_tariff"] = user_input.get("cold_water_tariff", DEFAULT_WATER_COLD)
+            data["hot_water_tariff"] = user_input.get("hot_water_tariff", DEFAULT_WATER_HOT)
+            title = self._params.get(CONF_NAME) or DEFAULT_NAME
+            return self.async_create_entry(title=title, data=data)
+
+        # Если счётчиков нет — просто создаём entry без шага тарифов.
+        if not has_meters:
+            data = dict(self._params)
+            data["selected"] = [d["id"] for d in self._devices]
+            data["devices"] = self._devices
+            data["create_dashboard"] = True
+            data["add_to_energy"] = True
+            data["electricity_tariff_day"] = DEFAULT_EL_DAY
+            data["electricity_tariff_night"] = DEFAULT_EL_NIGHT
+            data["cold_water_tariff"] = DEFAULT_WATER_COLD
+            data["hot_water_tariff"] = DEFAULT_WATER_HOT
+            title = self._params.get(CONF_NAME) or DEFAULT_NAME
+            return self.async_create_entry(title=title, data=data)
+
+        schema = vol.Schema(
+            {
+                vol.Required("electricity_tariff_day", default=DEFAULT_EL_DAY): vol.Coerce(float),
+                vol.Required("electricity_tariff_night", default=DEFAULT_EL_NIGHT): vol.Coerce(float),
+                vol.Optional("cold_water_tariff", default=DEFAULT_WATER_COLD): vol.Coerce(float),
+                vol.Optional("hot_water_tariff", default=DEFAULT_WATER_HOT): vol.Coerce(float),
+            }
+        )
+        note = (
+            "Тарифы квартиры (по умолчанию — Архангельск, без газа). "
+            "День/ночь электроэнергия, холодная и горячая вода. "
+            "Можно изменить — значения попадут в «Энергию»."
+        )
+        return self.async_show_form(
+            step_id="tariffs",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"note": note},
         )
 
     # ------------------------------------------------------------------

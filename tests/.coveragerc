@@ -13,6 +13,8 @@ omit =
     */akvilon_home/binary_sensor.py
     */akvilon_home/config_flow.py
     */akvilon_home/dashboard.py
+    */akvilon_home/energy.py
+    */akvilon_home/viewer.py
 
 [report]
 # Минимальное покрытие по тестируемым модулям
