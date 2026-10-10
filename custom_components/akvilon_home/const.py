@@ -25,6 +25,16 @@ DEFAULT_PORT = 19090
 VIDEO_TOKEN = "token_0:0"  # токен для всех видео-RTP потоков
 SIGN_KEY_HEX = "SUID_PLACEHOLDER"  # SUID building
 
+# Живой видеопоток (LiveStream/StreamManager в rtp_stream.py)
+# Лимит одновременных видео-сессий на сервере здания: не держим N потоков вечно.
+LIVE_MAX_CONCURRENT = 2
+# Срок жизни одной живой сессии перед авто-закрытием, сек.
+LIVE_SESSION_TTL = 600.0
+# Интервал переоткрытия сессии, если UDP-поток замолчал, сек.
+LIVE_RETRY_INTERVAL = 30.0
+# базовый URL живого окна viewer (заполняется при старте ViewerServer)
+VIEWER_BASE_PORT = 8090
+
 # Каналы протокола (из нативки libInHome)
 CHANNEL_CAMERAS = 0x10401    # список камер
 CHANNEL_GATES = 0xE0401      # список калиток

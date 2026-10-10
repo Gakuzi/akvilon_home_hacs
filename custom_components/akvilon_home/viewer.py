@@ -22,6 +22,9 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, unquote
 
+from .const import LIVE_MAX_CONCURRENT, LIVE_RETRY_INTERVAL, LIVE_SESSION_TTL
+from .rtp_stream import StreamManager
+
 _LOGGER = logging.getLogger(__name__)
 
 BOUNDARY = "akvilonmjpeg"
@@ -247,6 +250,23 @@ class FrameCache:
 
 _FAV_CACHE = {}
 
+# Глобальный адрес живого окна viewer. Заполняется в ViewerServer._start при
+# старте HTTP-панели и очищается в _stop. Используется camera.stream_source(),
+# чтобы отдать HA stream непрерывный источник (MJPEG поверх живой RTP-сессии).
+_LIVE_LOCK = threading.Lock()
+_LIVE_BASE = {"url": None}
+
+
+def live_base_url() -> str | None:
+    """Возвращает базовый URL работающего viewer (http://host:port) либо None."""
+    with _LIVE_LOCK:
+        return _LIVE_BASE["url"]
+
+
+def _set_live_base(url):
+    with _LIVE_LOCK:
+        _LIVE_BASE["url"] = url
+
 
 
 import subprocess
@@ -371,6 +391,17 @@ class ViewerServer:
         # глобальная сериализация захватов: сервер ограничивает частые openCamera,
         # поэтому одновременно открывается только одна камера
         self.grab_lock = threading.Lock()
+        # Менеджер живых RTP-сессий: один источник на камеру для всех зрителей,
+        # лимит одновременных сессий сервера соблюдается (max_concurrent).
+        # При полном освобождении сессии шлём closeCamera, чтобы не копить лимит
+        # активных видео-сессий на сервере здания.
+        hub = self.hub
+        self.streams = StreamManager(
+            max_concurrent=LIVE_MAX_CONCURRENT,
+            retry_interval=LIVE_RETRY_INTERVAL,
+            session_ttl=LIVE_SESSION_TTL,
+            on_release=lambda cam: hub._close_camera_session(cam),
+        )
         # папка записей (по умолчанию папка Аквилон на диске C владельца)
         import os
         default_rec = os.environ.get("AKVILON_REC_DIR", "/mnt/c/Users/eklim/Videos/Аквилон")
@@ -428,6 +459,8 @@ class ViewerServer:
 
         force=True используется для MIРEG-потока: игнорирует кэш и снимает НОВЫЙ
         кадр каждый раз (иначе mjpeg показывал бы один и тот же кадр 8 сек).
+        Через _live_frame такой захват идёт по общей живой RTP-сессии (один
+        источник на камеру для всех зрителей, лимит сессий соблюдается).
         """
         now = time.time()
         cache = self.cache.get(cam_id)
@@ -439,7 +472,10 @@ class ViewerServer:
             cache = self.cache.get(cam_id)
             if not force and cache and cache.get() and now - cache.ts < 8.0:
                 return cache.get()
-            jpg = self.hub.camera_frame(cam_id, timeout=timeout)
+            if force:
+                jpg = self._live_frame(cam_id, timeout=timeout)
+            else:
+                jpg = self.hub.camera_frame(cam_id, timeout=timeout)
             if jpg and len(jpg) > THUMB_MIN_BYTES:
                 if cache is None:
                     cache = FrameCache()
@@ -449,10 +485,35 @@ class ViewerServer:
                 return jpg
             return cache.get() if cache else None
 
+    def _live_frame(self, cam_id, timeout=8.0):
+        """Кадр из общей живой RTP-сессии камеры (общий источник для зрителей).
+
+        Если cameraSettings недоступны (сервер не отдал videoPort) — gracefully
+        откатываемся на разовый hub.camera_frame. Сессия закрывается, как только
+        этот зритель (и остальные) отписался — это и есть соблюдение лимита
+        активных видео-сессий сервера.
+        """
+        settings = self.hub.get_camera_settings(cam_id, force=True)
+        if not settings or not settings.get("videoPort"):
+            return self.hub.camera_frame(cam_id, timeout=timeout)
+        token = self.streams.subscribe(cam_id, settings)
+        try:
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                jpg = self.streams.latest(cam_id)
+                if jpg:
+                    return jpg
+                time.sleep(0.1)
+            return None
+        finally:
+            self.streams.unsubscribe(cam_id, token)
+
     def _start(self):
         self.httpd = ThreadingHTTPServer(("0.0.0.0", self.port), self._make_handler())
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
+        self.port = self.httpd.server_address[1]
+        _set_live_base(f"http://127.0.0.1:{self.port}")
         _LOGGER.info("Аквилон: веб-панель камер http://0.0.0.0:%d/ (%d камер)",
                      self.port, len(self._classify()))
 
@@ -461,6 +522,8 @@ class ViewerServer:
             self.httpd.shutdown()
             self.httpd.server_close()
             self.httpd = None
+        self.streams.close()  # закрываем все живые RTP-сессии
+        _set_live_base(None)
 
     def _make_handler(self):
         srv = self
