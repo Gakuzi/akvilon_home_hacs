@@ -1,13 +1,12 @@
 name: Tests
 
 # Запуск юнит-тестов на каждый push/PR — «ворота качества».
-# Пока тесты не зелёные, код нельзя сливать в develop/main.
+# Пока тесты не зелёные или покрытие ниже порога, код нельзя сливать в main.
 
 on:
   push:
     branches:
       - "feature/**"
-      - develop
       - main
   pull_request:
 
@@ -33,5 +32,4 @@ jobs:
       - name: Fail if coverage below threshold
         working-directory: custom_components
         run: |
-          python -m pytest ../tests --cov=akvilon_home --cov-config=../tests/.coveragerc --cov-fail-under=60 2>/dev/null \
-            && echo "Coverage OK (>=60%)" || echo "!! Внимание: покрытие ниже порога"
+          python -m pytest ../tests --cov=akvilon_home --cov-config=../tests/.coveragerc --cov-fail-under=60 --cov-report=term
