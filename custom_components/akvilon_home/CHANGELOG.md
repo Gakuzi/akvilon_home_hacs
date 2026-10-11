@@ -2,6 +2,27 @@
 
 Все суммы и статусы указаны в рублях РФ. Версии следуют SemVer.
 
+## v1.9.0-beta1 (2026-10-11, не выпущено)
+
+### Живой интерком: go2rtc + WebRTC + Frigate-детекция (feature/go2rtc-webrtc)
+
+- **`go2rtc.py`** — генерация конфигурации для живого видео камер/домофона:
+  `ffmpeg:`/`exec:`-источники go2rtc, YAML-блок `streams:`, webrtc/api адреса для
+  карточки `custom:webrtc-camera`.
+- **`go2rtc_proxy.py`** — исполняемый мост для go2rtc: сам открывает камеру,
+  читает RTP/H.264 и пишет сырой H.264 в stdout (источник `exec:`).
+  Покрывает ограничение «наш поток — RTP/UDP, а не RTSP».
+- **`frigate_detect.py`** — абстракция AI-детекции person: `binary_sensor`
+  «человек у двери», фоновый HTTP-опрос `api/events`, событие
+  `akvilon_home_person_detected`; конфиг-блок детектора `detect:`.
+- **Настройка** — опции в entry.data (по умолчанию выключены), OptionsFlow и
+  миграция старых entry.
+- **Сервисы:** `go2rtc_config`, `go2rtc_stream_url`, `go2rtc_proxy_cmd`.
+- **Безопасность:** go2rtc/Frigate в код не включены; выключенные опции не влияют
+  на загрузку/релоад HA.
+- **Тесты:** `tests/test_go2rtc.py`, `tests/test_frigate_detect.py`.
+- Подробности: `docs/ADR/ADR-003-intercom-go2rtc-frigate.md`.
+
 ## v1.7.0-beta2 (2026-10-10)
 
 ### Новые функции

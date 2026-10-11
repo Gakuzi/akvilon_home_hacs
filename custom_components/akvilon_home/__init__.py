@@ -34,11 +34,21 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_SERVER_ID,
     CONF_NAME,
+    CONF_GO2RTC_ENABLED,
+    CONF_GO2RTC_BASE_URL,
+    CONF_FRIGATE_ENABLED,
+    CONF_FRIGATE_BASE_URL,
+    CONF_FRIGATE_API_URL,
+    CONF_FRIGATE_LABELS,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_NAME,
     DEFAULT_DEVICE_ID,
     DEFAULT_SERVER_ID,
+    DEFAULT_GO2RTC_BASE_URL,
+    DEFAULT_FRIGATE_BASE_URL,
+    DEFAULT_FRIGATE_API_URL,
+    DEFAULT_FRIGATE_LABELS,
     CAMERAS,
     GATES,
     METERS,
@@ -111,6 +121,83 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.services.async_register(DOMAIN, "start_viewer", _async_start_viewer)
     hass.services.async_register(DOMAIN, "stop_viewer", _async_stop_viewer)
+
+    # ---- сервисы go2rtc/WebRTC (живой поток домофона/камер, опционально) ----
+    from . import go2rtc as _go2rtc
+
+    def _hub_for_entry():
+        return hass.data.get(DOMAIN, {}).get(entry.entry_id)
+
+    def _camera_ids_for_media(hub_obj) -> list[str]:
+        """Ид камер для go2rtc/Frigate: приоритет — камеры домофонов, фолбэк — все."""
+        intercoms = getattr(hub_obj, "intercoms", None) or []
+        ids = [str(i.get("cameraId") or "") for i in intercoms if str(i.get("cameraId") or "") not in ("", "0:-1")]
+        if not ids:
+            ids = [str(c.get("objectid") or c.get("objectId") or "")
+                   for c in (getattr(hub_obj, "cameras", None) or [])]
+        return list(dict.fromkeys(x for x in ids if x))
+
+    async def _async_go2rtc_config(call):
+        """Возвращает готовый YAML-блок ``streams:`` для go2rtc.yaml."""
+        hub = _hub_for_entry()
+        if hub is None:
+            return {"error": "hub unavailable"}
+        py = call.data.get("python", "python3")
+        only = str(call.data.get("cam_id") or "").strip()
+        specs = []
+        for cid in _camera_ids_for_media(hub):
+            if only and cid != only:
+                continue
+            specs.append({
+                "cam_id": cid,
+                "settings": (hub._video_settings or {}).get(cid) or {},
+            })
+        if not specs:
+            return {"error": "no cameras"}
+        yaml_block = _go2rtc.build_config(
+            specs,
+            host=hub.host, port=hub.port,
+            passwd=hub.token, device_id=hub.device_id, server_id=hub.server_id,
+            python=py,
+        )
+        return {"cameras": len(specs), "yaml": yaml_block}
+
+    async def _async_go2rtc_stream_url(call):
+        """Возвращает webrtc-адрес потока для карточки custom:webrtc-camera."""
+        hub = _hub_for_entry()
+        if hub is None:
+            return {"error": "hub unavailable"}
+        cid = str(call.data.get("cam_id") or "").strip()
+        base = str(call.data.get("base_url") or
+                   (dict(entry.options or {}).get(CONF_GO2RTC_BASE_URL) or DEFAULT_GO2RTC_BASE_URL))
+        if not cid:
+            return {"error": "cam_id required"}
+        return {
+            "cam_id": cid,
+            "stream": _go2rtc.go2rtc_stream_name(cid),
+            "webrtc_url": _go2rtc.webrtc_url(base, cid),
+            "api_url": _go2rtc.api_stream_url(base, cid),
+        }
+
+    async def _async_go2rtc_proxy_cmd(call):
+        """Возвращает ``exec:``-команду для go2rtc (диагностика/ручная настройка)."""
+        hub = _hub_for_entry()
+        if hub is None:
+            return {"error": "hub unavailable"}
+        cid = str(call.data.get("cam_id") or "").strip()
+        if not cid:
+            return {"error": "cam_id required"}
+        py = call.data.get("python", "python3")
+        return {
+            "cam_id": cid,
+            "exec": _go2rtc.build_exec_cmd(
+                cid, hub.host, hub.port, hub.token, hub.device_id, hub.server_id, py,
+            ),
+        }
+
+    hass.services.async_register(DOMAIN, "go2rtc_config", _async_go2rtc_config)
+    hass.services.async_register(DOMAIN, "go2rtc_stream_url", _async_go2rtc_stream_url)
+    hass.services.async_register(DOMAIN, "go2rtc_proxy_cmd", _async_go2rtc_proxy_cmd)
 
     # Устанавливаем флаг "setup завершается фоном" — создаём сущности,
     # как только сервер ответит данными, НЕ блокируя загрузку HA.
@@ -239,6 +326,13 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     new_data.setdefault("electricity_tariff_night", 3.91)
     new_data.setdefault("cold_water_tariff", 0.0)
     new_data.setdefault("hot_water_tariff", 0.0)
+    # Опции go2rtc/WebRTC и Frigate (актуально для старых entry без этих полей).
+    new_data.setdefault(CONF_GO2RTC_ENABLED, False)
+    new_data.setdefault(CONF_GO2RTC_BASE_URL, DEFAULT_GO2RTC_BASE_URL)
+    new_data.setdefault(CONF_FRIGATE_ENABLED, False)
+    new_data.setdefault(CONF_FRIGATE_BASE_URL, DEFAULT_FRIGATE_BASE_URL)
+    new_data.setdefault(CONF_FRIGATE_API_URL, DEFAULT_FRIGATE_API_URL)
+    new_data.setdefault(CONF_FRIGATE_LABELS, DEFAULT_FRIGATE_LABELS)
     entry.data = new_data
     entry.version = 2
     entry.minor_version = 1

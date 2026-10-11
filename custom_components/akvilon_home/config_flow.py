@@ -27,7 +27,17 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_SERVER_ID,
     CONF_NAME,
+    CONF_GO2RTC_ENABLED,
+    CONF_GO2RTC_BASE_URL,
+    CONF_FRIGATE_ENABLED,
+    CONF_FRIGATE_BASE_URL,
+    CONF_FRIGATE_API_URL,
+    CONF_FRIGATE_LABELS,
     DEFAULT_NAME,
+    DEFAULT_GO2RTC_BASE_URL,
+    DEFAULT_FRIGATE_BASE_URL,
+    DEFAULT_FRIGATE_API_URL,
+    DEFAULT_FRIGATE_LABELS,
 )
 from .protocol import parse_qr
 from .tariffs import TARIFF_FIELDS, parse_tariffs
@@ -51,6 +61,11 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._params = {}
         self._devices = []
+
+    @staticmethod
+    def async_get_options_flow(config_entry):
+        """Возвращает класс OptionsFlow для настройки go2rtc/Frigate."""
+        return AkvilonHomeOptionsFlow(config_entry)
 
     # ------------------------------------------------------------------
     # Шаг 1: ввод ключа
@@ -136,6 +151,22 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     # ------------------------------------------------------------------
     # Шаг 3: тарифы (Энергия) — Архангельск по умолчанию, можно изменить
     # ------------------------------------------------------------------
+    @staticmethod
+    def _add_media_defaults(data: dict) -> dict:
+        """Добавляет в entry.data опции go2rtc/WebRTC и Frigate по умолчанию.
+
+        Значения хранятся в entry.data (при создании) и могут быть изменены через
+        OptionsFlow (см. AkvilonHomeOptionsFlow). Все поля опциональны и не
+        влияют на загрузку, если функции выключены.
+        """
+        data.setdefault(CONF_GO2RTC_ENABLED, False)
+        data.setdefault(CONF_GO2RTC_BASE_URL, DEFAULT_GO2RTC_BASE_URL)
+        data.setdefault(CONF_FRIGATE_ENABLED, False)
+        data.setdefault(CONF_FRIGATE_BASE_URL, DEFAULT_FRIGATE_BASE_URL)
+        data.setdefault(CONF_FRIGATE_API_URL, DEFAULT_FRIGATE_API_URL)
+        data.setdefault(CONF_FRIGATE_LABELS, DEFAULT_FRIGATE_LABELS)
+        return data
+
     async def async_step_tariffs(self, user_input: dict | None = None) -> FlowResult:
         errors: dict[str, str] = {}
         has_meters = any(d.get("type") == "meter" for d in self._devices)
@@ -148,6 +179,7 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             data["add_to_energy"] = True
             # Каноническая нормализация тарифов (missing/битые -> defaults региона).
             data.update(parse_tariffs(user_input))
+            self._add_media_defaults(data)
             title = self._params.get(CONF_NAME) or DEFAULT_NAME
             return self.async_create_entry(title=title, data=data)
 
@@ -159,6 +191,7 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             data["create_dashboard"] = True
             data["add_to_energy"] = True
             data.update(parse_tariffs(None))
+            self._add_media_defaults(data)
             title = self._params.get(CONF_NAME) or DEFAULT_NAME
             return self.async_create_entry(title=title, data=data)
 
@@ -264,3 +297,74 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             return await self.async_step_user(user_input)
         return self.async_show_form(step_id="reconfigure", data_schema=schema)
+
+
+class AkvilonHomeOptionsFlow(config_entries.OptionsFlow):
+    """OptionsFlow: включение/настройка go2rtc/WebRTC и Frigate-детекции.
+
+    Доступен из «Система -> Устройства и службы -> Аквилон InHome -> Параметры».
+    Шаг ``init`` показывает вкл/выкл и базовые URL; изменения сохраняются в
+    entry.options и не ломают загрузку, если функции выключены.
+    """
+
+    def __init__(self, config_entry):
+        self._entry = config_entry
+
+    async def async_step_init(self, user_input: dict | None = None) -> FlowResult:
+        data = self._entry.data or {}
+        if user_input is not None:
+            # Сохраняем только go2rtc/Frigate-поля (остальные data не трогаем);
+            # unsupported-key-ошибок не будет, т.к. опции пишем в options.
+            options = {
+                CONF_GO2RTC_ENABLED: bool(user_input.get(CONF_GO2RTC_ENABLED, False)),
+                CONF_GO2RTC_BASE_URL: user_input.get(
+                    CONF_GO2RTC_BASE_URL, DEFAULT_GO2RTC_BASE_URL
+                ),
+                CONF_FRIGATE_ENABLED: bool(user_input.get(CONF_FRIGATE_ENABLED, False)),
+                CONF_FRIGATE_BASE_URL: user_input.get(
+                    CONF_FRIGATE_BASE_URL, DEFAULT_FRIGATE_BASE_URL
+                ),
+                CONF_FRIGATE_API_URL: user_input.get(
+                    CONF_FRIGATE_API_URL, DEFAULT_FRIGATE_API_URL
+                ),
+                CONF_FRIGATE_LABELS: user_input.get(
+                    CONF_FRIGATE_LABELS, DEFAULT_FRIGATE_LABELS
+                ),
+            }
+            return self.async_create_entry(title="", data=options)
+
+        # Текущие значения: предпочтение options, фолбэк data.
+        cur = {**data, **dict(self._entry.options or {})}
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_GO2RTC_ENABLED, default=bool(cur.get(CONF_GO2RTC_ENABLED, False))
+                ): bool,
+                vol.Optional(
+                    CONF_GO2RTC_BASE_URL, default=cur.get(CONF_GO2RTC_BASE_URL, DEFAULT_GO2RTC_BASE_URL)
+                ): str,
+                vol.Optional(
+                    CONF_FRIGATE_ENABLED, default=bool(cur.get(CONF_FRIGATE_ENABLED, False))
+                ): bool,
+                vol.Optional(
+                    CONF_FRIGATE_BASE_URL, default=cur.get(CONF_FRIGATE_BASE_URL, DEFAULT_FRIGATE_BASE_URL)
+                ): str,
+                vol.Optional(
+                    CONF_FRIGATE_API_URL, default=cur.get(CONF_FRIGATE_API_URL, DEFAULT_FRIGATE_API_URL)
+                ): str,
+                vol.Optional(
+                    CONF_FRIGATE_LABELS, default=cur.get(CONF_FRIGATE_LABELS, DEFAULT_FRIGATE_LABELS)
+                ): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=schema,
+            description_placeholders={
+                "note": (
+                    "Связка go2rtc + WebRTC + Frigate для живого видео и детекции "
+                    "человека у домофона. Обе функции опциональны: выключенные не "
+                    "влияют на загрузку HA. Подробнее — docs/ADR/ADR-003."
+                )
+            },
+        )

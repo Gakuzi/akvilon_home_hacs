@@ -40,3 +40,60 @@ stop_viewer:
   name: Остановить веб-панель камер
   description: Остановить запущенную веб-панель камер
   fields: {}
+
+go2rtc_config:
+  name: Сгенерировать go2rtc-конфиг
+  description: Вернуть готовый YAML-блок streams: для go2rtc.yaml (живой поток камер/домофона)
+  fields:
+    cam_id:
+      name: ID камеры
+      description: Идентификатор камеры (пусто = все камеры домофонов)
+      required: false
+      example: "2:101967"
+      selector:
+        text:
+    python:
+      name: Интерпретатор Python
+      description: Команда запуска python для go2rtc_proxy.py (по умолчанию python3)
+      required: false
+      default: python3
+      selector:
+        text:
+
+go2rtc_stream_url:
+  name: go2rtc URL потока
+  description: Вернуть webrtc/api адрес для карточки custom:webrtc-camera
+  fields:
+    cam_id:
+      name: ID камеры
+      description: Идентификатор камеры
+      required: true
+      example: "2:101967"
+      selector:
+        text:
+    base_url:
+      name: Базовый URL go2rtc
+      description: Адрес go2rtc (http://host:port). Пусто = настройка опций
+      required: false
+      example: "http://127.0.0.1:1984"
+      selector:
+        text:
+
+go2rtc_proxy_cmd:
+  name: exec-команда go2rtc-моста
+  description: Вернуть exec: команду для настройки go2rtc вручную (диагностика)
+  fields:
+    cam_id:
+      name: ID камеры
+      description: Идентификатор камеры
+      required: true
+      example: "2:101967"
+      selector:
+        text:
+    python:
+      name: Интерпретатор Python
+      description: Команда запуска python (по умолчанию python3)
+      required: false
+      default: python3
+      selector:
+        text:

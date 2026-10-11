@@ -5,7 +5,8 @@
 """
 
 DOMAIN = "akvilon_home"
-PLATFORMS = ["camera", "button", "sensor", "binary_sensor"]
+# frigate_detect — отдельная платформа (паттерн binary_sensor) с `async_setup_entry`
+PLATFORMS = ["camera", "button", "sensor", "binary_sensor", "frigate_detect"]
 
 CONF_HOST = "host"
 CONF_PORT = "port"
@@ -34,6 +35,32 @@ LIVE_SESSION_TTL = 600.0
 LIVE_RETRY_INTERVAL = 30.0
 # базовый URL живого окна viewer (заполняется при старте ViewerServer)
 VIEWER_BASE_PORT = 8090
+
+# --- go2rtc/WebRTC (живой поток домофона/камер, ОПЦИОНАЛЬНАЯ внешняя зависимость) ---
+# go2rtc — внешний аддон/процесс; интеграция лишь даёт пользователю готовую
+# конфигурацию и сервисы, НЕ содержит go2rtc и не ломается при его отсутствии.
+CONF_GO2RTC_ENABLED = "go2rtc_enabled"
+CONF_GO2RTC_BASE_URL = "go2rtc_base_url"
+CONF_GO2RTC_PORT = "go2rtc_port"
+DEFAULT_GO2RTC_PORT = 1984
+DEFAULT_GO2RTC_BASE_URL = "http://127.0.0.1:1984"
+# таймаут UDP-входа ffmpeg-источника go2rtc (мс); стандарт ~2М = 33 мин.
+DEFAULT_GO2RTC_TIMEOUT_MS = 2000000
+# префикс имени потока go2rtc для камер Аквилон (чтобы не пересекаться с чужими)
+GO2RTC_STREAM_PREFIX = "akvilon_"
+
+# --- Frigate-детекция (живой человек у домофона, ОПЦИОНАЛЬНАЯ внешняя зависимость) ---
+# Frigate — внешний процесс (64-bit host). Интеграция отдаёт контракт-настройку
+# и binary_sensor'ы, тянуть Frigate в HACS-копию не требуется.
+CONF_FRIGATE_ENABLED = "frigate_enabled"
+CONF_FRIGATE_BASE_URL = "frigate_base_url"
+CONF_FRIGATE_API_URL = "frigate_api_url"
+CONF_FRIGATE_MQTT_TOPIC = "frigate_mqtt_topic"
+CONF_FRIGATE_LABELS = "frigate_labels"
+DEFAULT_FRIGATE_BASE_URL = "http://127.0.0.1:5000"
+DEFAULT_FRIGATE_API_URL = "http://127.0.0.1:5000/api"
+DEFAULT_FRIGATE_MQTT_TOPIC = "frigate/events"
+DEFAULT_FRIGATE_LABELS = "person"
 
 # Каналы протокола (из нативки libInHome)
 CHANNEL_CAMERAS = 0x10401    # список камер
@@ -142,3 +169,12 @@ def intercom_dev_id(ic_id) -> tuple:
 
 def meter_dev_id(device_number) -> tuple:
     return _devid("meter", device_number)
+
+
+def go2rtc_stream_name(cam_id: str) -> str:
+    """Стабильное имя потока go2rtc для камеры.
+
+    go2rtc-имя должно быть уникальным в рамках всех источников и не содержать
+    спецсимволов URL — используем префикс + безопасный id (числа/двоеточия).
+    """
+    return GO2RTC_STREAM_PREFIX + str(cam_id).replace(":", "_")

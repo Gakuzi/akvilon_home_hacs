@@ -61,6 +61,7 @@ def _install_hass_stub():
 
     class BinarySensorDeviceClass:
         CONNECTIVITY = "connectivity"
+        PRESENCE = "presence"
 
     class Camera(_EntityBase):
         def __init__(self, *a, **kw):

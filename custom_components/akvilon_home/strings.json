@@ -32,6 +32,18 @@
           "connection_string": "Строка подключения / QR",
           "name": "Название"
         }
+      },
+      "init": {
+        "title": "go2rtc / WebRTC / Frigate",
+        "description": "{note}",
+        "data": {
+          "go2rtc_enabled": "Включить go2rtc/WebRTC",
+          "go2rtc_base_url": "Базовый URL go2rtc",
+          "frigate_enabled": "Включить Frigate-детекцию",
+          "frigate_base_url": "Базовый URL Frigate",
+          "frigate_api_url": "API-эндпоинт Frigate (/api)",
+          "frigate_labels": "Метки детекции (через запятую)"
+        }
       }
     },
     "error": {
@@ -53,6 +65,18 @@
     "stop_viewer": {
       "name": "Остановить веб-панель камер",
       "description": "Остановить запущенную веб-панель камер"
+    },
+    "go2rtc_config": {
+      "name": "Сгенерировать go2rtc-конфиг",
+      "description": "Вернуть готовый YAML-блок streams: для go2rtc.yaml"
+    },
+    "go2rtc_stream_url": {
+      "name": "go2rtc URL потока",
+      "description": "Вернуть webrtc/api адрес для карточки custom:webrtc-camera"
+    },
+    "go2rtc_proxy_cmd": {
+      "name": "exec-команда go2rtc-моста",
+      "description": "Вернуть exec: команду для настройки go2rtc вручную"
     }
   }
 }

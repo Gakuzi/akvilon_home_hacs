@@ -2,6 +2,28 @@
 
 Все суммы и статусы указаны в рублях РФ. Версии следуют SemVer.
 
+## v1.9.0-beta1 (2026-10-11, не выпущено)
+
+### Живой интерком: go2rtc + WebRTC + Frigate-детекция (feature/go2rtc-webrtc)
+
+- **`go2rtc.py`** — чистая генерация конфигурации для низкозадержного живого
+  видео камер/домофона: `ffmpeg:`/`exec:`-источники для go2rtc.yaml, YAML-блок
+  `streams:`, webrtc/api адреса для карточки `custom:webrtc-camera`.
+- **`go2rtc_proxy.py`** — исполняемый мост: сам открывает камеру
+  (openCamera → cameraSettings → подписочный пакет `b"\x00\x00"+token`), читает
+  RTP/H.264 и пишет сырой H.264 в stdout — источник для `exec:` в go2rtc.
+  Покрывает ограничение «наш поток — RTP/UDP, а не RTSP».
+- **`frigate_detect.py`** — абстракция AI-детекции person: `binary_sensor`
+  «человек у двери», фоновый HTTP-опрос `api/events`, событие
+  `akvilon_home_person_detected` для push; конфиг-блок детектора `detect:`.
+- **Настройка** — опции go2rtc/Frigate в entry.data (по умолчанию выключены) +
+  OptionsFlow («Аквилон InHome» → Параметры) и миграция старых entry.
+- **Сервисы:** `go2rtc_config`, `go2rtc_stream_url`, `go2rtc_proxy_cmd`.
+- **Безопасность:** интеграция не содержит go2rtc/Frigate; при выключенных опциях
+  работает как раньше, загрузка/релоад HA не ломаются.
+- **Тесты:** `tests/test_go2rtc.py`, `tests/test_frigate_detect.py` (покрытие 81%).
+- Подробности: `docs/ADR/ADR-003-intercom-go2rtc-frigate.md`.
+
 ## v1.8.0 (2026-10-10)
 
 ### Стабильность UDP-ядра (SPEC-003) — `protocol.py`, `coordinator.py`

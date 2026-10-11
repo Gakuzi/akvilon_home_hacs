@@ -15,6 +15,7 @@ omit =
     */akvilon_home/dashboard.py
     */akvilon_home/energy.py
     */akvilon_home/viewer.py
+    */akvilon_home/frigate_detect.py
 
 [report]
 # Минимальное покрытие по тестируемым модулям
