@@ -168,3 +168,49 @@ def test_is_akvilon_entity_foreign_platform():
 
     # entity в реестре, но НЕ наша платформа
     assert E._is_akvilon_entity(Reg(), "sensor.chuzhoi") is False
+
+
+# ---------------------------------------------------------------------------
+# Очистка битых grid-каналов (регрессия: отопление, ошибочно добавленное как
+# электричество, должно вычищаться из панели; чужие каналы сохраняются).
+# ---------------------------------------------------------------------------
+def test_split_flows_separates_akvilon_and_foreign():
+    class Ent:
+        platform = "akvilon_home"
+
+    class Reg:
+        entities = {
+            "sensor.schetchik_otoplenie": Ent(),
+            "sensor.pribory_ucheta_kv_31_electrichstvo_i1_den": Ent(),
+        }
+
+    flows = [
+        # Отопление, ошибочно застрявшее в электросети (наша платформа)
+        {"stat_energy_from": "sensor.schetchik_otoplenie", "number_energy_price": 0.0},
+        # Битый/переименованный счётчик электричества (наша платформа)
+        {"stat_energy_from": "sensor.pribory_ucheta_kv_31_electrichstvo_i1_den",
+         "number_energy_price": 0.0},
+        # Чужой счётчик (не наша платформа) — сохранить
+        {"stat_energy_from": "sensor.energy_maps_grid", "number_energy_price": 5.0},
+    ]
+
+    theirs, ours = E._split_flows(flows, Reg())
+
+    # наши битые каналы из grid вычищаются
+    assert {f["stat_energy_from"] for f in ours} == {
+        "sensor.schetchik_otoplenie",
+        "sensor.pribory_ucheta_kv_31_electrichstvo_i1_den",
+    }
+    # чужие сохраняются нетронутыми
+    assert [f["stat_energy_from"] for f in theirs] == ["sensor.energy_maps_grid"]
+
+
+def test_split_flows_no_registry_uses_prefix():
+    # Без реестра (или сенсор уже удалён) — по префиксу entity_id.
+    flows = [
+        {"stat_energy_from": "sensor.schetchik_gvs", "number_energy_price": 0.0},
+        {"stat_energy_from": "sensor.other_integration", "number_energy_price": 0.0},
+    ]
+    theirs, ours = E._split_flows(flows, None)
+    assert [f["stat_energy_from"] for f in ours] == ["sensor.schetchik_gvs"]
+    assert [f["stat_energy_from"] for f in theirs] == ["sensor.other_integration"]
