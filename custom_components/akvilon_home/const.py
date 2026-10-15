@@ -6,7 +6,7 @@
 
 DOMAIN = "akvilon_home"
 # frigate_detect — отдельная платформа (паттерн binary_sensor) с `async_setup_entry`
-PLATFORMS = ["camera", "button", "sensor", "binary_sensor", "frigate_detect"]
+PLATFORMS = ["camera", "button", "sensor", "binary_sensor"]
 
 CONF_HOST = "host"
 CONF_PORT = "port"

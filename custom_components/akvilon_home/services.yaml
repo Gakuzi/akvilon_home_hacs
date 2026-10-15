@@ -43,7 +43,7 @@ stop_viewer:
 
 go2rtc_config:
   name: Сгенерировать go2rtc-конфиг
-  description: Вернуть готовый YAML-блок streams: для go2rtc.yaml (живой поток камер/домофона)
+  description: "Вернуть готовый YAML-блок streams: для go2rtc.yaml (живой поток камер/домофона)"
   fields:
     cam_id:
       name: ID камеры
@@ -81,7 +81,7 @@ go2rtc_stream_url:
 
 go2rtc_proxy_cmd:
   name: exec-команда go2rtc-моста
-  description: Вернуть exec: команду для настройки go2rtc вручную (диагностика)
+  description: "Вернуть exec: команду для настройки go2rtc вручную (диагностика)"
   fields:
     cam_id:
       name: ID камеры
