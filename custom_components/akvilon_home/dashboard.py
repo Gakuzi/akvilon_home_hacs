@@ -5,20 +5,38 @@
 (камеры, калитки, домофоны, счётчики), поэтому новые устройства появляются сами.
 
 Панель использует ТОЛЬКО штатные карточки Home Assistant
-(vertical-stack / picture-entity / entities / grid / tile / markdown / heading),
-без зависимостей от custom JS-карточек, поэтому работает в любом браузере и не
-ломается после обновления HA. Виды повторяют функции приложения InHome:
-Обзор / Камеры / Калитки / Счётчики / Домофон / Киоск. Пустые виды (например,
-когда домофонов на сервере 0) скрываются.
+(vertical-stack / picture-entity / entities / grid / tile / markdown / heading /
+sections), без зависимостей от custom JS-карточек, поэтому работает в любом
+браузере и не ломается после обновления HA. Виды повторяют функции приложения
+InHome: Обзор / Камеры / Калитки / Счётчики / Домофон / Киоск. Пустые виды
+(например, когда домофонов на сервере 0) скрываются.
 
 Стиль карточек использует переменные активной темы Home Assistant, поэтому
 смена темы автоматически перестраивает внешний вид.
+
+Параллельные фичи (видеокарточка камер, интерком-карточки калиток/домофонов,
+пуш-уведомление звонка домофона) могут поставлять свои ВИДОВЫЕ модули:
+`viewcard` / `intercomcard` / `ding`. Этот модуль — «сборщик»: он ПОДКЛЮЧАЕТ их
+нейтрально через безопасный ленивый импорт (`_optional_fn`) и фолбэк на свою
+реализацию при их отсутствии. Если модуль/функция не установлены или сломаны —
+панель работает на текущей логике без поломок.
+
+Контракт опциональных модулей (реальные функции параллельных фич):
+  * viewcard.build_camera_grid(resolver, cam_ids) -> list     # видеокарточки камер
+  * intercomcard.build_intercom_card(title, btn, status, cam,
+                                     open_name, open_icon, kiosk=False) -> dict
+  * ding.async_setup_ding(hass, hub) -> listener | None      # интеграция push-звонка
+        (интегрируется в __init__.py; на панели при желании добавляется подсказка
+         через ding.ding_hint, если такой хелпер появится — иначе подсказка пуста)
 """
+import importlib
 import json
 import logging
 import os
 import time
 from typing import Any
+
+from . import dashboard_layout as layout
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,6 +61,33 @@ VIEW_KIOSK = "Киоск"
 # Виды, которые существуют только если найдены соответствующие сущности
 # (используется для retry-пересборки при асинхронной регистрации сущностей).
 _ENTITY_VIEWS = {VIEW_CAMERAS, VIEW_GATES, VIEW_METERS, VIEW_INTERCOM}
+
+
+def _optional_fn(module_name: str, fn_name: str):
+    """Безопасно вернуть callable из опционального «видового» модуля.
+
+    Если модуль не установлен или не имеет функции — возвращает None, а не
+    роняет сборку панели. Это ядро нейтральной интеграции параллельных фич.
+    """
+    try:
+        mod = importlib.import_module(f"{__package__}.{module_name}")
+        return getattr(mod, fn_name, None)
+    except Exception:  # module missing or broken -> neutral fallback
+        return None
+
+
+def _try_card(fn, *args: Any, **kwargs: Any):
+    """Вызвать опциональную функцию и вернуть результат или None при ошибке.
+
+    Позволяет использовать чужие видовые функции, даже если они поменяют
+    сигнатуру/сломаются — мы просто фолбэчим на собственные карточки.
+    """
+    if fn is None:
+        return None
+    try:
+        return fn(*args, **kwargs)
+    except Exception:  # pragma: no cover - defensive against other agents' code
+        return None
 
 
 def _strip_suffix(eid: str) -> str:
@@ -127,28 +172,83 @@ def _entity(entity: str, name: str = "", icon: str = "") -> dict:
 
 
 def _picture_camera(cam: str, title: str) -> dict:
-    return {
-        "type": "picture-entity",
-        "entity": cam,
-        "camera_view": "live",
-        "show_state": False,
-        "show_name": True,
-        "name": title,
-    }
+    """Стандартная picture-entity видеокарточка (утилита-фолбэк)."""
+    return layout.picture_camera(cam, title)
 
 
 def _video_stack(title: str, btn: str, status: str, cam: str,
                  open_name: str, open_icon: str) -> dict:
-    """vertical-stack (видео-панель): камера + кнопка + статус."""
+    """vertical-stack (видео-панель): камера + кнопка + статус (фолбэк).
+
+    Используется, если нет модуля `intercomcard`. Кнопка открытия — tile с
+    tap_action -> button.press (то же, что в intercomcard, для единообразия).
+    """
     cards = []
     if cam:
         cards.append(_picture_camera(cam, title))
-    items = [_entity(btn, open_name, open_icon)]
+    items = [layout.tile_button(btn, open_name, open_icon)]
     if status:
-        items.append(_entity(status, "Статус", "mdi:lock-open-variant"))
-    cards.append({"type": "entities", "title": title,
-                  "entities": items, "state_color": True})
-    return {"type": "vertical-stack", "cards": cards}
+        items.append(layout.tile(status, "Статус", icon="mdi:lock-open-variant"))
+    cards.append(layout.entities_card(items, title=title))
+    return layout.vertical_stack(cards)
+
+
+def _intercom_card(title: str, btn: str, status: str, cam: str,
+                   open_name: str, open_icon: str, kiosk: bool = False) -> dict:
+    """Интерком-карточка калитки/домофона с попыткой использовать parallel-модуль.
+
+    Если агент B поставил `intercomcard.build_intercom_card` — используем его
+    карточку (camera + tile-кнопка открытия с perform-action + статус);
+    иначе возвращаем собственный фолбэк `_video_stack`. Нейтральная интеграция.
+    """
+    fn = _optional_fn("intercomcard", "build_intercom_card")
+    built = None
+    if fn is not None:
+        built = _try_card(fn, title, btn, status, cam, open_name, open_icon, kiosk)
+    if isinstance(built, dict) and built:
+        return built
+    return _video_stack(title, btn, status, cam, open_name, open_icon)
+
+
+def _cameras_cards(resolver, cam_ids: list) -> list:
+    """Набор карточек вида «Камеры» с интеграцией модуля `viewcard`.
+
+    Если агент A поставил `viewcard.build_camera_grid(resolver, cam_ids)` — его
+    результат (список видеокарточек) используется как карточки вида; иначе —
+    фолбэк: grid из picture-entity карточек. Только наши камеры. Если камер нет
+    (пустой cam_ids) — возвращаем [], чтобы вид «Камеры» скрылся.
+    """
+    if not cam_ids:
+        return []
+    fn = _optional_fn("viewcard", "build_camera_grid")
+    built = None
+    if fn is not None:
+        built = _try_card(fn, resolver, cam_ids)
+    if isinstance(built, list) and built:
+        return built
+    # Фолбэк: аккуратная сетка наших камер.
+    pics = [_picture_camera(c, _friendly(c)) for c in cam_ids]
+    return [layout.grid(pics)]
+
+
+def _ding_hint(hass: Any, hub) -> str | None:
+    """Подсказка про пуш-звонок домофона от модуля `ding` (если он есть).
+
+    Возвращает markdown-контент (или None, если фича не установлена).
+    """
+    fn = _optional_fn("ding", "ding_hint")
+    if fn is None:
+        return None
+    res = None
+    try:
+        res = fn(hass, hub)
+    except Exception:
+        res = None
+    if isinstance(res, str) and res.strip():
+        return res
+    if isinstance(res, dict) and res.get("content"):
+        return str(res["content"])
+    return None
 
 
 def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
@@ -179,16 +279,11 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
     meters = r.find("sensor.schetchik")
 
     # --- Обзор: заголовок + статус сервера + краткая справка ---
-    overview_cards = [
-        {"type": "heading", "heading": "Аквилон InHome", "heading_style": "title"}
-    ]
+    overview_cards = [layout.heading("Аквилон InHome")]
     if online_entity:
-        overview_cards.append({
-            "type": "grid", "grid_options": {"columns": "full"}, "cards": [
-                {"type": "tile", "entity": online_entity, "name": "Сервер здания",
-                 "icon": "mdi:server-network", "vertical": False},
-            ],
-        })
+        overview_cards.append(layout.grid(
+            [layout.tile(online_entity, "Сервер здания",
+                         icon="mdi:server-network")], full=True))
     summary = []
     if cam_ids:
         summary.append(f"▸ **Камеры** — {len(cam_ids)} камер")
@@ -199,11 +294,7 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
     if dom_btns:
         summary.append(f"▸ **Домофон** — {len(dom_btns)} панелей вызова")
     if summary:
-        overview_cards.append({
-            "type": "markdown",
-            "content": "\n".join(summary),
-            "grid_options": {"columns": "full"},
-        })
+        overview_cards.append(layout.markdown("\n".join(summary)))
 
     # --- Калитки: кнопка + статус (и камера, если найдена) ---
     gate_cards = []
@@ -212,7 +303,7 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
         core = btn.split("button.otkryt_kalitka_")[-1]
         status = next((s for s in gate_state if core in s), "")
         cam = next((c for c in cam_ids if core in c), "")
-        gate_cards.append(_video_stack(
+        gate_cards.append(_intercom_card(
             f"Калитка {core}", btn, status, cam,
             "Открыть", "mdi:door-open"))
         if status:
@@ -220,9 +311,8 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
     # Калитки, у которых нет отдельной кнопки, но есть сенсор состояния
     for s in gate_state:
         if s not in used_status:
-            gate_cards.append({"type": "entities",
-                               "entities": [_entity(s, _friendly(s))],
-                               "state_color": True})
+            gate_cards.append(layout.entities_card(
+                [_entity(s, _friendly(s))]))
 
     # --- Домофон: видео-панели (камера + кнопка + статус) ---
     dom_cards = []
@@ -232,41 +322,42 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
         status = next((s for s in dom_sensors if core in s), "")
         cam = next((c for c in cam_ids if core in c), "")
         title = core.replace("_", " ").title() or "Домофон"
-        dom_cards.append(_video_stack(
+        dom_cards.append(_intercom_card(
             title, btn, status, cam,
             "Открыть", "mdi:door-bell"))
 
     # --- Камеры ---
-    cam_cards = [_picture_camera(c, _friendly(c)) for c in cam_ids]
+    cam_view_cards = _cameras_cards(r, cam_ids)
 
     # --- Счётчики ---
-    meter_cards = [{"type": "tile", "entity": m, "name": _friendly(m),
-                    "icon": "mdi:counter"} for m in meters]
+    meter_cards = [layout.tile(m, _friendly(m), icon="mdi:counter")
+                   for m in meters]
 
     # --- Киоск: крупные кнопки открытия калиток для планшета ---
-    kiosk_cards = [{"type": "tile", "entity": btn, "name": f"Открыть {_friendly(btn)}",
-                    "icon": "mdi:door-open", "vertical": False}
+    kiosk_cards = [layout.tile_button(btn, f"Открыть {_friendly(btn)}",
+                                      icon="mdi:door-open")
                    for btn in gate_btns]
 
-    def _view(title: str, path: str, heading: str, cards: list) -> dict:
-        return {
-            "type": "sections", "title": title, "path": path,
-            "sections": [{"type": "grid", "cards": [
-                {"type": "heading", "heading": heading, "heading_style": "title"},
-            ] + cards}],
-        }
+    def _view(title: str, path: str, heading: str, cards: list,
+              columns: str | None = None) -> dict:
+        return layout.section_view(title, path, heading, cards, columns=columns)
 
     views = [_view(VIEW_OVERVIEW, "overview", "Аквилон InHome", overview_cards)]
 
     # Пустые виды не добавляются.
-    if cam_cards:
-        views.append(_view(VIEW_CAMERAS, "cameras", "Камеры", cam_cards))
+    if cam_view_cards:
+        views.append(_view(VIEW_CAMERAS, "cameras", "Камеры", cam_view_cards))
     if gate_cards:
         views.append(_view(VIEW_GATES, "gates", "Калитки", gate_cards))
     if meter_cards:
         views.append(_view(VIEW_METERS, "meters", "Счётчики", meter_cards))
     if dom_cards:
-        views.append(_view(VIEW_INTERCOM, "intercom", "Домофон", dom_cards))
+        dom_view_cards = list(dom_cards)
+        # Добавляем подсказку про пуш-звонок, если фича `ding` установлена.
+        hint = _ding_hint(hass, hub)
+        if hint:
+            dom_view_cards.append(layout.markdown(hint))
+        views.append(_view(VIEW_INTERCOM, "intercom", "Домофон", dom_view_cards))
     if kiosk_cards:
         views.append(_view(VIEW_KIOSK, "kiosk", "Киоск", kiosk_cards))
 

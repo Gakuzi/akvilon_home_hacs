@@ -137,10 +137,15 @@ class TestBuildPayload:
         _use_resolver(monkeypatch, FULL_ENTITIES)
         payload = dash.build_dashboard_payload(None)
         gates_view = _views(payload)[dash.VIEW_GATES]
+        # крупная кнопка открытия — tile с perform-action (button.press)
+        tiles = [c for c in _all_cards(gates_view) if c.get("type") == "tile"]
+        assert any(
+            "button.otkryt_kalitka_1" in str(t.get("entity", ""))
+            and t.get("tap_action", {}).get("action") == "perform-action"
+            for t in tiles
+        )
+        # статус — sенсор в entities-карточке
         entities = [c for c in _all_cards(gates_view) if c.get("type") == "entities"]
-        # хотя бы в одной entities-карточке есть кнопка и статус
-        assert any("button.otkryt_kalitka_1" in str(e.get("entity", ""))
-                   for card in entities for e in card.get("entities", []))
         assert any("sensor.kalitka_1_sostoianie" in str(e.get("entity", ""))
                    for card in entities for e in card.get("entities", []))
 
