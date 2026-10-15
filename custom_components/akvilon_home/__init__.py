@@ -227,6 +227,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await async_setup_energy(hass, entry)
         except Exception as exc:  # pragma: no cover
             _LOGGER.warning("Аквилон: не удалось настроить энергосистему: %s", exc)
+        # Пуш-звонок домофона (Feature C): сервис ding_notify + слушатель вызова.
+        try:
+            from .ding import async_setup_ding
+            listener = await async_setup_ding(hass, hub)
+            if listener is not None:
+                hub.set_ding_listener(listener)
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.warning("Аквилон: не удалось настроить пуш-звонок домофона: %s", exc)
         # Создаём/обновляем дашборд «Аквилон». Сущности регистрируются асинхронно,
         # поэтому пересобираем панель несколько раз с паузой, чтобы успеть собрать
         # реальные entity_id (иначе первый запуск видит пустой registry).

@@ -37,7 +37,7 @@ def test_energy_constants():
     assert C is not None
     # const не содержит energy-тарifов (они в energy.py), но проверим базовые константы
     assert C.DOMAIN == "akvilon_home"
-    assert C.PLATFORMS == ["camera", "button", "sensor", "binary_sensor", "frigate_detect"]
+    assert C.PLATFORMS == ["camera", "button", "sensor", "binary_sensor"]
 
 
 # ---------------------------------------------------------------------------
