@@ -193,6 +193,21 @@ class AkvilonHub:
     def meters(self) -> list:
         return [m for m in self._meters if self._is_selected(str(m.get("objectid") or m.get("objectId") or ""))]
 
+    def meter_by_number(self, device_number: str) -> dict | None:
+        """Находит актуальный метер по deviceNumber (для живых метер-сенсоров).
+
+        Возвращает свежий словарь метера из hub, если device_number совпал.
+        Используется сенсорами ``AkvilonMeterSensor``/``AkvilonMeterTariffSensor``,
+        чтобы показатель и device_class не «застывали» на версии первой загрузки.
+        """
+        if not device_number:
+            return None
+        for m in self._meters:
+            mn = str(m.get("deviceNumber") or m.get("device_number") or "")
+            if mn == str(device_number):
+                return m
+        return None
+
     @property
     def intercoms(self) -> list:
         return [i for i in self._intercoms if self._is_selected(str(i.get("objectid") or i.get("objectId") or ""))]

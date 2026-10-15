@@ -1,19 +1,170 @@
 """Автоматическая интеграция счётчиков Аквилон в энергосистему Home Assistant.
 
 При настройке интеграции (add_to_energy=True) добавляет счётчики квартиры в
-«Энергия» (Энергопанель): электричество (с тарифами день/ночь по умолчанию),
-горячую/холодную воду и отопление. Использует EnergyManager — программно
-пишет energy_sources, чтобы пользователю не пришлось настраивать вручную.
+«Энергию» (Энергопанель): электричество (с тарифами день/ночь по умолчанию),
+холодную и горячую воду. Использует EnergyManager — программно пишет
+energy_sources, чтобы пользователю не пришлось настраивать вручную.
+
+Отличия от ранних версий:
+  * копилотская, надёжная привязка entity_id — через entity_registry по
+    unique_id сенсора (falls back на скан состояний), поэтому в панель
+    попадает ИМЕННО базовый счётчик дня и ночи, а не «первый, содержащий
+    подстроку» (раньше ``_find_entity`` мог взять сразу тариф-_noch);
+  * отопление НЕ добавляется в панель — Энергопанель HA не поддерживает
+    теплосчётчики (единица Гкал) как источник: такой сенсор отклонялся с
+    «класс устройства отличается от ожидаемого»;
+  * битые/устаревшие источники Аквилон (сенсоры, которых больше нет, или
+    прежние неверные grid/water) удаляются, чтобы панель не показывала
+    «Не удалось определить объект».
 """
 import logging
 
 from homeassistant.core import HomeAssistant
 
+from .const import DOMAIN
 from .tariffs import parse_tariffs
+from .sensor import _meter_current
 
 _LOGGER = logging.getLogger(__name__)
 
+# Префиксы entity_id наших метер-сенсоров (для очистки устаревших источников,
+# даже когда сенсор уже удалён из registry).
+_AKVILON_METER_PREFIXES = ("sensor.schetchik", "sensor.pribory")
 
+
+# ---------------------------------------------------------------------------
+# Классификация счётчиков (чистые функции — тестируются голым Python)
+# ---------------------------------------------------------------------------
+def _unit_class(unit: str) -> str | None:
+    """Канонический класс по единице измерения."""
+    u = (unit or "").strip().lower()
+    if "kwh" in u or "квт" in u:
+        return "energy"
+    if any(x in u for x in ("m3", "м3", "м³", "куб")):
+        return "water"
+    if "gcal" in u or "гкал" in u:
+        return "heating"
+    return None
+
+
+def classify_meter(meter: dict) -> str | None:
+    """Определяет роль счётчика для энергосистемы.
+
+    Приоритет — единицы измерения (канонический класс), затем resourceType,
+    затем имя. Возвращает ``electricity``, ``cold_water``, ``hot_water``,
+    ``heating`` или ``None`` (не пригоден для панели).
+    """
+    cur = _meter_current(meter)
+    unit = ""
+    if isinstance(cur, dict):
+        unit = (cur.get("unit") or "").strip()
+    uclass = _unit_class(unit)
+    rt = str(meter.get("resourceType", ""))
+    name = str(meter.get("name") or "").lower()
+
+    if uclass == "energy" or rt == "1" or "электр" in name or "electric" in name:
+        return "electricity"
+    if uclass == "heating" or rt == "4" or "отоп" in name or "тепло" in name:
+        return "heating"
+    if uclass == "water" or rt in ("2", "3"):
+        if rt == "2" or "гвс" in name or "горяч" in name:
+            return "hot_water"
+        return "cold_water"
+    return None
+
+
+def _electricity_flows(day_id, night_id, base_id, price_day, price_night) -> list:
+    """Строит канал grid для двух-тарифного счётчика.
+
+    Если есть оба тарифа Т1/Т2 (день/ночь) — две записи с раздельными ценами.
+    Иначе — единственный канал по полному показанию. Возвращает список dict.
+    """
+    if day_id and night_id:
+        return [
+            {"stat_energy_from": day_id, "number_energy_price": price_day},
+            {"stat_energy_from": night_id, "number_energy_price": price_night},
+        ]
+    if base_id:
+        return [{"stat_energy_from": base_id, "number_energy_price": price_day}]
+    return []
+
+
+def _is_akvilon_entity(reg, eid: str | None) -> bool:
+    """Принадлежит ли entity_id нашей интеграции (для очистки старых источников).
+
+    Сначала проверяет entity_registry (platform == DOMAIN); если реестра нет или
+    сенсор уже удалён — по префиксу entity_id метер-сенсоров Аквилон.
+    """
+    if not eid:
+        return False
+    if reg is not None:
+        try:
+            entry = reg.entities.get(eid)
+        except Exception:  # noqa: BLE001
+            entry = None
+        if entry is not None:
+            return getattr(entry, "platform", "") == DOMAIN
+    return eid.startswith(_AKVILON_METER_PREFIXES)
+
+
+# ---------------------------------------------------------------------------
+# Резолв entity_id
+# ---------------------------------------------------------------------------
+def _uid_to_eid(reg) -> dict:
+    """Маппинг unique_id -> entity_id наших sensor-сущностей из registry."""
+    out: dict = {}
+    if reg is None:
+        return out
+    try:
+        for ent in reg.entities.values():
+            platform = getattr(ent, "platform", "")
+            uid = getattr(ent, "unique_id", "")
+            eid = getattr(ent, "entity_id", "") or ""
+            if platform == DOMAIN and "sensor" in eid and uid:
+                out[uid] = eid
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _resolve_meter_eids(reg, hass, device_number: str) -> dict:
+    """Возвращает entity_id базового/тарифных сенсоров для device_number.
+
+    Ключи: ``base``, ``day``, ``night``. Надежный путь — entity_registry по
+    unique_id; запасной — скан состояний по совпадению уникального id.
+    """
+    base_uid = f"{DOMAIN}_meter_{device_number}"
+    day_uid = f"{DOMAIN}_meter_{device_number}_tariff0"
+    night_uid = f"{DOMAIN}_meter_{device_number}_tariff1"
+
+    uid_map = _uid_to_eid(reg)
+    result = {
+        "base": uid_map.get(base_uid),
+        "day": uid_map.get(day_uid),
+        "night": uid_map.get(night_uid),
+    }
+
+    # Fallback: скан состояний (senosur может быть зарегистрирован, но ещё не
+    # попасть в наш _uid_to_eid — например, при частичном reload).
+    if not any(result.values()):
+        try:
+            for rec in hass.states.async_all():
+                if rec.entity_id.startswith(DOMAIN + ".sensor."):
+                    attrs = getattr(rec, "attributes", {}) or {}
+                    if attrs.get("unique_id") == base_uid:
+                        result["base"] = rec.entity_id
+                    elif attrs.get("unique_id") == day_uid:
+                        result["day"] = rec.entity_id
+                    elif attrs.get("unique_id") == night_uid:
+                        result["night"] = rec.entity_id
+        except Exception:  # noqa: BLE001
+            pass
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Сборка источников
+# ---------------------------------------------------------------------------
 async def async_setup_energy(hass: HomeAssistant, entry) -> None:
     """Добавляет счётчики Аквилон в Энергосистему (energy_sources)."""
     data = entry.data or {}
@@ -28,13 +179,6 @@ async def async_setup_energy(hass: HomeAssistant, entry) -> None:
     price_cold = tariffs["cold_water_tariff"]
     price_hot = tariffs["hot_water_tariff"]
 
-    # Находим entity_id наших сенсоров по префиксу (домен akvilon_home)
-    elec_from = _find_entity(hass, "sensor", "schetchik_elektrichestvo")
-    elec_to = _find_entity(hass, "sensor", "schetchik_elektrichestvo_noch")
-    water_cold = _find_entity(hass, "sensor", "schetchik_khvs")
-    water_hot = _find_entity(hass, "sensor", "schetchik_gvs")
-    heat = _find_entity(hass, "sensor", "schetchik_otoplenie")
-
     try:
         from homeassistant.components.energy import async_get_manager
         manager = await async_get_manager(hass)
@@ -42,73 +186,100 @@ async def async_setup_energy(hass: HomeAssistant, entry) -> None:
         _LOGGER.warning("Аквилон: энергосистема недоступна: %s", exc)
         return
 
+    try:
+        from homeassistant.helpers import entity_registry as er
+        reg = er.async_get(hass)
+    except Exception:  # pragma: no cover
+        reg = None
+
+    # Живой hub: берём реально выбранные счётчики.
+    hub = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    meters = list(hub.meters) if hub is not None else []
+
+    grid_flows: list = []
+    water_entries: list = []  # {"type":"water", "stat_energy_from", price}
+
+    for meter in meters:
+        role = classify_meter(meter)
+        dn = str(meter.get("deviceNumber") or meter.get("device_number") or "").strip()
+        if not dn:
+            continue
+        ids = _resolve_meter_eids(reg, hass, dn)
+        if role == "electricity":
+            flows = _electricity_flows(
+                ids.get("day"), ids.get("night"), ids.get("base"),
+                price_day, price_night,
+            )
+            if flows:
+                grid_flows = flows
+        elif role in ("cold_water", "hot_water") and ids.get("base"):
+            price = price_cold if role == "cold_water" else price_hot
+            we = {"type": "water", "stat_energy_from": ids["base"]}
+            if price > 0:
+                we["number_energy_price"] = price
+            water_entries.append(we)
+        # role == heating — не добавляем: панель HA не поддерживает Гкал.
+
     # Читаем текущие источники (нужно сохранить чужие!).
     current = manager.data.get("energy_sources", []) if manager.data else []
     sources = list(current) if current else []
 
-    # Электричество (день + ночь) — grid-source
-    if elec_from:
-        grid = _find_source(sources, "grid")
-        flow_from = [
-            {
-                "stat_energy_from": elec_from,
-                "stat_cost": None,
-                "entity_energy_price": None,
-                "number_energy_price": price_day,
-            }
-        ]
-        if elec_to:
-            flow_from.append({
-                "stat_energy_from": elec_to,
-                "stat_cost": None,
-                "entity_energy_price": None,
-                "number_energy_price": price_night,
-            })
+    # --- Электричество (grid) ---
+    grid = _find_source(sources, "grid")
+    if grid_flows:
         if grid is None:
             sources.append({
                 "type": "grid",
-                "flow_from": flow_from,
+                "flow_from": list(grid_flows),
                 "flow_to": [],
                 "cost_adjustment_day": 0.0,
             })
-        # иначе — добавить канал в существующий grid (не перетираем чужие)
         else:
-            existing = grid.get("flow_from", [])
-            existing_keys = {f.get("stat_energy_from") for f in existing}
-            for f in flow_from:
-                if f["stat_energy_from"] not in existing_keys:
-                    existing.append(f)
-            grid["flow_from"] = existing
+            # Заменяем ТОЛЬКО наши каналы grid, чужие сохраняем.
+            theirs, _ours = _split_flows(grid.get("flow_from", []), reg)
+            merged = list(theirs)
+            for entry_flow in grid_flows:
+                if entry_flow["stat_energy_from"] not in {
+                    f.get("stat_energy_from") for f in merged
+                }:
+                    merged.append(entry_flow)
+            grid["flow_from"] = merged
+    elif grid is not None:
+        # Счётчиков электричества нет — убираем наши grid-каналы.
+        theirs, ours = _split_flows(grid.get("flow_from", []), reg)
+        if ours:
+            grid["flow_from"] = theirs
 
-    # Холодная и горячая вода (добавляем всегда, цена опциональна)
-    if water_cold:
-        _upsert_source(sources, "water", water_cold, price_cold)
-    if water_hot:
-        _upsert_source(sources, "water", water_hot, price_hot)
-
-    # Отопление (статистика Гкал)
-    if heat:
-        _upsert_source(sources, "water", heat, 0.0, name="Отопление")
+    # --- Вода: удаляем прежние источники Аквилон (в т.ч. отопление) и добавляем свежие ---
+    kept = [
+        s for s in sources
+        if not (isinstance(s, dict) and s.get("type") == "water"
+                and _is_akvilon_entity(reg, s.get("stat_energy_from")))
+    ]
+    sources = kept
+    for we in water_entries:
+        _upsert_source(
+            sources, we["type"], we["stat_energy_from"],
+            we.get("number_energy_price", 0.0),
+        )
 
     try:
         await manager.async_update({"energy_sources": sources})
         _LOGGER.info(
-            "Аквилон: счётчики добавлены в Энергию (элек-во %s, вода %s/%s, тепло %s)",
-            elec_from or "—", water_cold or "—", water_hot or "—", heat or "—",
+            "Аквилон: счётчики добавлены в Энергию (grid-каналов %d, вода %d)",
+            len(grid_flows), len(water_entries),
         )
     except Exception as exc:  # pragma: no cover
         _LOGGER.warning("Аквилон: не удалось обновить энергосистему: %s", exc)
 
 
-def _find_entity(hass: HomeAssistant, domain: str, substr: str) -> str | None:
-    """Возвращает entity_id сенсора по подстроке, либо None."""
-    try:
-        for eid in hass.states.async_all():
-            if eid.entity_id.startswith(f"{domain}.") and substr in eid.entity_id:
-                return eid.entity_id
-    except Exception:  # pragma: no cover
-        pass
-    return None
+def _split_flows(flows, reg):
+    """Разделяет flow-записи grid на (наши, чужие) по принадлежности entity."""
+    ours, theirs = [], []
+    for f in flows:
+        eid = f.get("stat_energy_from")
+        (ours if _is_akvilon_entity(reg, eid) else theirs).append(f)
+    return theirs, ours
 
 
 def _find_source(sources, stype: str):
