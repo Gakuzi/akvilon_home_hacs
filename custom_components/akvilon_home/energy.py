@@ -94,6 +94,11 @@ def _is_akvilon_entity(reg, eid: str | None) -> bool:
 
     Сначала проверяет entity_registry (platform == DOMAIN); если реестра нет или
     сенсор уже удалён — по префиксу entity_id метер-сенсоров Аквилон.
+
+    Дополнительно относим к «нашим» дублирующиеся базовые сущности, которые HA
+    создал с суффиксом ``_2`` при коллизии имён (это артефакты старых версий
+    интеграции). Иначе префиксный матч ловит только базовую версию, а орфанная
+    ``_2`` навсегда остаётся в энергопанели.
     """
     if not eid:
         return False
@@ -105,6 +110,35 @@ def _is_akvilon_entity(reg, eid: str | None) -> bool:
         if entry is not None:
             return getattr(entry, "platform", "") == DOMAIN
     return eid.startswith(_AKVILON_METER_PREFIXES)
+
+
+def _normalize_flow_entry(f: dict) -> dict | None:
+    """Приводит одну FLOW-запись grid-канала к схеме, которую принимает HA.
+
+    Убирает «битые» записи, где цена задана одновременно и числом, и полем
+    (``stat_cost``/``entity_energy_price`` рядом с ``number_energy_price``) —
+    EnergyManager отклоняет такую запись как ``invalid_format`` (это и есть
+    «ошибка при удалении счётчика» в Энергопанели). Если запись не содержит ни
+    одного валидного источника энергии — возвращает None (запись выбрасывается).
+    """
+    if not isinstance(f, dict):
+        return None
+    eid = f.get("stat_energy_from")
+    if not isinstance(eid, str) or not eid:
+        return None
+    result = {"stat_energy_from": eid}
+    # Одиночный способ задания цены: приоритет у числовой цены за кВт·ч/м³.
+    num = f.get("number_energy_price")
+    ent = f.get("entity_energy_price")
+    cost = f.get("stat_cost")
+    if num is not None:
+        result["number_energy_price"] = num
+    elif ent is not None and isinstance(ent, str) and ent:
+        result["entity_energy_price"] = ent
+    elif cost is not None and isinstance(cost, str) and cost:
+        result["stat_cost"] = cost
+    # stat_energy_to / flow_to-подобные поля не переносим — они не входят в FLOW.
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -226,29 +260,31 @@ async def async_setup_energy(hass: HomeAssistant, entry) -> None:
 
     # --- Электричество (grid) ---
     grid = _find_source(sources, "grid")
-    if grid_flows:
-        if grid is None:
-            sources.append({
-                "type": "grid",
-                "flow_from": list(grid_flows),
-                "flow_to": [],
-                "cost_adjustment_day": 0.0,
-            })
-        else:
-            # Заменяем ТОЛЬКО наши каналы grid, чужие сохраняем.
-            theirs, _ours = _split_flows(grid.get("flow_from", []), reg)
-            merged = list(theirs)
-            for entry_flow in grid_flows:
-                if entry_flow["stat_energy_from"] not in {
-                    f.get("stat_energy_from") for f in merged
-                }:
-                    merged.append(entry_flow)
-            grid["flow_from"] = merged
+    if grid_flows and grid is None:
+        # Нет источника — создаём с чистым набором каналов.
+        sources.append({
+            "type": "grid",
+            "flow_from": list(grid_flows),
+            "flow_to": [],
+            "cost_adjustment_day": 0.0,
+        })
     elif grid is not None:
-        # Счётчиков электричества нет — убираем наши grid-каналы.
+        # Убираем наши (аквилоновские) flow-каналы и заменяем на свежие,
+        # чужие каналы сохраняем как есть (но нормализуем их от битых полей).
         theirs, ours = _split_flows(grid.get("flow_from", []), reg)
-        if ours:
-            grid["flow_from"] = theirs
+        merged = [n for f in theirs if (n := _normalize_flow_entry(f)) is not None]
+        seen = {n.get("stat_energy_from") for n in merged}
+        for entry_flow in grid_flows:
+            nf = _normalize_flow_entry(entry_flow)
+            if nf and nf["stat_energy_from"] not in seen:
+                merged.append(nf)
+                seen.add(nf["stat_energy_from"])
+        if grid_flows:
+            # Есть живые каналы — кладём их даже если старых «наших» не было.
+            grid["flow_from"] = merged
+        else:
+            # Счётчиков электричества нет — остаются только чужие нормализованные.
+            grid["flow_from"] = merged
 
     # --- Вода: удаляем прежние источники Аквилон (в т.ч. отопление) и добавляем свежие ---
     kept = [
@@ -256,6 +292,9 @@ async def async_setup_energy(hass: HomeAssistant, entry) -> None:
         if not (isinstance(s, dict) and s.get("type") == "water"
                 and _is_akvilon_entity(reg, s.get("stat_energy_from")))
     ]
+    # Убираем дубли water-источников: если одна и та же our-сущность указана
+    # несколько раз (могла накопиться при коллизии имён _2) — оставляем одну.
+    kept = _dedupe_sources(kept)
     sources = kept
     for we in water_entries:
         _upsert_source(
@@ -288,6 +327,27 @@ def _find_source(sources, stype: str):
         if isinstance(s, dict) and s.get("type") == stype:
             return s
     return None
+
+
+def _dedupe_sources(sources: list) -> list:
+    """Убирает дубли источников по (type, stat_energy_from).
+
+    Исторические версии интеграции могли оставить по одной записи и на базовую
+    сущность, и на её дубль с суффиксом ``_2`` (один и тот же счётчик). Такие
+    пары панель «Энергия» показывает как дубликаты и мешает нормально удалить.
+    Сливаем в одну запись (берём первую), остальные отбрасываем.
+    """
+    seen: set = set()
+    out: list = []
+    for s in sources:
+        if not isinstance(s, dict):
+            continue
+        key = (s.get("type"), s.get("stat_energy_from"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
 
 
 def _upsert_source(sources, stype: str, stat_id: str, price: float, name: str | None = None):

@@ -214,3 +214,55 @@ def test_split_flows_no_registry_uses_prefix():
     theirs, ours = E._split_flows(flows, None)
     assert [f["stat_energy_from"] for f in ours] == ["sensor.schetchik_gvs"]
     assert [f["stat_energy_from"] for f in theirs] == ["sensor.other_integration"]
+
+
+# ---------------------------------------------------------------------------
+# Нормализация битых FLOW-записей и дедупликация источников
+# ---------------------------------------------------------------------------
+def test_normalize_flow_keeps_number_price_only():
+    # Битая запись с лишними null-полями (invalid_format в EnergyManager) →
+    # остаётся только stat_energy_from + number_energy_price.
+    bad = {
+        "stat_energy_from": "sensor.schetchik_elektrichestvo",
+        "stat_cost": None,
+        "entity_energy_price": None,
+        "number_energy_price": 8.67,
+    }
+    norm = E._normalize_flow_entry(bad)
+    assert norm == {"stat_energy_from": "sensor.schetchik_elektrichestvo",
+                    "number_energy_price": 8.67}
+    assert "stat_cost" not in norm
+    assert "entity_energy_price" not in norm
+
+
+def test_normalize_flow_prefers_number_over_entity():
+    f = {"stat_energy_from": "sensor.x", "entity_energy_price": "sensor.price",
+         "number_energy_price": 5.0}
+    norm = E._normalize_flow_entry(f)
+    assert norm == {"stat_energy_from": "sensor.x", "number_energy_price": 5.0}
+
+
+def test_normalize_flow_drops_entry_without_energy():
+    # Запись без stat_energy_from — выбрасывается.
+    assert E._normalize_flow_entry({}) is None
+    assert E._normalize_flow_entry({"stat_energy_from": "", "number_energy_price": 1.0}) is None
+    # stat_energy_to без stat_energy_from тоже не валидна (в flow из stat_energy_from).
+    assert E._normalize_flow_entry({"stat_energy_to": "sensor.y"}) is None
+
+
+def test_normalize_flow_keeps_bare_entity_id():
+    # Валидная запись: stat_energy_from без цены (цена по умолчанию 0).
+    assert E._normalize_flow_entry({"stat_energy_from": "sensor.x"}) == {"stat_energy_from": "sensor.x"}
+
+
+def test_dedupe_sources_by_type_and_stat():
+    sources = [
+        {"type": "water", "stat_energy_from": "sensor.schetchik_gvs"},
+        {"type": "water", "stat_energy_from": "sensor.schetchik_gvs"},  # дубль
+        {"type": "water", "stat_energy_from": "sensor.schetchik_khvs"},
+        {"type": "grid", "stat_energy_from": "sensor.el"},
+    ]
+    out = E._dedupe_sources(sources)
+    assert len(out) == 3
+    assert (["s" for s in out if s["type"] == "water"] and
+            sum(1 for s in out if s["type"] == "water" and s["stat_energy_from"] == "sensor.schetchik_gvs") == 1)
