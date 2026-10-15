@@ -97,3 +97,43 @@ go2rtc_proxy_cmd:
       default: python3
       selector:
         text:
+
+ding_notify:
+  name: Пуш о звонке домофона
+  description: Отправить пуш-уведомление о вызове домофона через notify.<target> (опционально с кадром камеры). Автоматизация-дружественный сервис; без target уведомление не отправляется.
+  fields:
+    title:
+      name: Заголовок
+      description: Заголовок уведомления (по умолчанию «Звонок в домофон <имя>»)
+      required: false
+      example: "Звонок в домофон"
+      selector:
+        text:
+    message:
+      name: Текст
+      description: Текст уведомления
+      required: false
+      example: "Кто-то звонит в домофон"
+      selector:
+        text:
+          multiline: true
+    target:
+      name: target уведомления
+      description: Имя notify-платформы, например mobile_app_iphone. Без target уведомление не отправляется.
+      required: false
+      example: "mobile_app_iphone"
+      selector:
+        text:
+    camera_id:
+      name: ID камеры
+      description: ID камеры (например "2:101967"), с которой захватить кадр для уведомления (захват в executor)
+      required: false
+      example: "2:101967"
+      selector:
+        text:
+    image:
+      name: Готовое изображение
+      description: Путь/URL/URI изображения для уведомления (приоритетнее camera_id)
+      required: false
+      selector:
+        text:

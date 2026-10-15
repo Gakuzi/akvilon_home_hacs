@@ -40,6 +40,9 @@ class AkvilonHub:
         self._online = False  # запасной онлайн-признак (по refresh)
         self.last_refresh_error = None
         self.selected: list[str] | None = None  # None = все
+        # Слушатель пуш-звонка домофона (Feature C). Один на hub; хранится,
+        # чтобы интеграция могла остановить его при выгрузке (см. ding.py).
+        self._ding_listener = None
 
     def _new_client(self) -> AkvilonClient:
         cl = AkvilonClient(
@@ -352,3 +355,27 @@ class AkvilonHub:
             self.client.close()
             self.client = None
         self._reader = None
+        # Останавливаем слушатель пуш-звонка при выгрузке/перезагрузке.
+        self.stop_ding_listener()
+
+    def set_ding_listener(self, listener):
+        """Регистрирует слушатель пуш-звонка домофона (Feature C).
+
+        Слушатель (ding.DingListener) держит собственную подписанную UDP-сессию
+        и не зависит от короткоживущих сессий refresh/open_gate. Хранится на
+        hub, чтобы интеграция могла остановить его при выгрузке.
+        """
+        self._ding_listener = listener
+
+    @property
+    def ding_listener(self):
+        """Активный слушатель пуш-звонка (или None)."""
+        return self._ding_listener
+
+    def stop_ding_listener(self):
+        """Останавливает слушатель звонка, если он запущен (идемпотентно)."""
+        if self._ding_listener is not None:
+            try:
+                self._ding_listener.stop()
+            finally:
+                self._ding_listener = None

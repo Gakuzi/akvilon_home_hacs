@@ -66,7 +66,7 @@
       "name": "Остановить веб-панель камер",
       "description": "Остановить запущенную веб-панель камер"
     },
-    "go2rtc_config": {
+"go2rtc_config": {
       "name": "Сгенерировать go2rtc-конфиг",
       "description": "Вернуть готовый YAML-блок streams: для go2rtc.yaml"
     },
@@ -77,6 +77,10 @@
     "go2rtc_proxy_cmd": {
       "name": "exec-команда go2rtc-моста",
       "description": "Вернуть exec: команду для настройки go2rtc вручную"
+    },
+    "ding_notify": {
+      "name": "Пуш о звонке домофона",
+      "description": "Отправить пуш-уведомление о вызове домофона через notify.<target> (опционально с кадром камеры)"
     }
   }
 }
