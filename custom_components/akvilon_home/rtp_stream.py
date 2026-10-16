@@ -1,28 +1,23 @@
-"""Приём и декод H.264 RTP-потока камер Аквилон InHome (кадр и живой поток).
+"""Приём и декод H.264 RTP-потока камер Аквилон InHome.
 
 Видео камер идёт от сервера здания (videoHost:videoPort) на UDP-порт клиента
 в формате RTP/H.264 (payload type 96/97/98, срочный: FU-A для нарезки NAL).
 Параметры кодека (SPS/PPS) берутся из cameraSettings.spropParameter.
 
-Статус (2026-10-08): РАБОТАЕТ. РПР-поток запускается отправкой подписочного
+Статус (2026-10-08): РАБОТАЕТ. RTP-поток запускается отправкой подписочного
 пакета b"\x00\x00"+videoToken на videoHost:videoPort (см. _kick). Этот модуль
 — приёмник: слушает RTP, за 1-2 сек собирает IDR-кадр и отдаёт JPEG через
 ffmpeg. Если поток не пошёл — методы вернут None, не блокируя HA.
 
-Высокоуровневое API (в executor):
+Использование (в executor):
     stream = RtpStream(settings)
-    jpg = stream.grab_jpeg(timeout=6.0)   # один кадр: bytes | None
+    jpg = stream.grab_jpeg(timeout=6.0)   # bytes | None
     stream.close()
-
-Непрерывный поток (для свежего окна/HA stream) — см. LiveStream/StreamManager
-в конце модуля: один RTP-приёмник на камеру шарится между зрителями (refcount),
-соблюдается лимит одновременных видео-сессий сервера.
 """
 import base64
 import logging
 import socket
 import subprocess
-import threading
 import time
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,13 +25,6 @@ _LOGGER = logging.getLogger(__name__)
 RTP_MAX = 65535
 # H.264 RTP payload type (динамический диапазон 96-127; обычно 96..98)
 RTP_PT_RANGE = frozenset(range(96, 128))
-
-# Значение по умолчанию: сколько живых UDP/RTP-сессий одновременно держим.
-LIVE_MAX_CONCURRENT = 2
-# Срок жизни одной сессии (переустановка/закрытие), сек.
-LIVE_SESSION_TTL = 600.0
-# Интервал переоткрытия сессии, если сервер замолчал (UDP-таймаут), сек.
-LIVE_RETRY_INTERVAL = 30.0
 
 
 def parse_sprop(sprop: str):
@@ -108,6 +96,7 @@ class RtpStream:
             return None
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-probesize", "32", "-analyzeduration", "0",
             "-f", "h264", "-i", "-", "-frames:v", "1",
             "-an", "-f", "mjpeg", "-y", "-",
         ]
@@ -173,33 +162,46 @@ class RtpStream:
         annexb = b"".join(parts)
         return self._decode_ffmpeg(annexb)
 
-    def _iter_frames(self, timeout, stop=None):
-        """Генератор полных картинок из RTP-потока до timeout (или __stop__).
+    def grab_jpeg(self, timeout=6.0, kick=True):
+        """Слушает RTP до timeout, собирает полную картинку (IDR) и декодит в JPEG.
 
-        Отдаёт (picture: list[NAL], got_idr: bool) для каждого завершённого
-        кадра. Полная сборка: одиночные NAL, STAP-A и фрагментация FU-A
-        (сегменты сливаются по временному маркеру RTP). Кадр считается
-        завершённым, когда из сокета приходит RTP-пакет с новым тайммаркером,
-        либо по истечении timeout (последний остаток тоже отдаётся).
+        Возвращает bytes (JPEG) при успехе или None, если поток не пошёл/нет IDR
+        (сервер не стартует RTP — обычный случай без точной подписки).
 
-        stop — threading.Event: если установлен, генератор завершается досрочно.
+        Полная сборка: корректно обрабатываются одиночные NAL, STAP-A и
+        фрагментация FU-A (сегменты сливаются по временному маркеру RTP).
         """
+        if not self.sock:
+            self.bind(0)
+        if not self.port:
+            return None
+        if kick:
+            self._kick()
         deadline = time.time() + timeout
+        # Сервер иногда теряет первый подписочный пакет либо «усыпляет» сессию.
+        # Периодический re-kick (раз в секунду) надёжно держит поток живым и
+        # снимает зависимость от того, дошёл ли до сервера первый kick
+        # (рабочий прототип akv_get_video.py шлёт токен повторно).
+        last_kick = time.time()
+        kick_interval = 1.0
         picture = []        # NAL-юниты текущей картинки (по одному ts)
         fu_acc = None       # буфер текущего FU-A фрагмента (bytearray + base header)
         cur_ts = None
         got_idr = False
         while time.time() < deadline:
-            if stop is not None and stop.is_set():
-                break
+            if kick and (time.time() - last_kick) >= kick_interval:
+                self._kick()
+                last_kick = time.time()
             r = self._recv_rtp()
             if r is None:
                 continue
             ts, pt, marker, payload = r
-            # новый RTP-тайммаркер = начало нового кадра -> отдаём старый
+            # новый RTP-тайммаркер = начало нового кадра -> пробуем декод старого
             if cur_ts is not None and ts != cur_ts:
-                if picture:
-                    yield picture, got_idr
+                if picture and got_idr:
+                    jpg = self._feed_picture(picture)
+                    if jpg:
+                        return jpg
                 picture = []
                 got_idr = False
                 fu_acc = None
@@ -246,29 +248,18 @@ class RtpStream:
             if ntype == 5:
                 got_idr = True
             picture.append(payload)
-        if picture:
-            yield picture, got_idr
 
-    def grab_jpeg(self, timeout=6.0, kick=True):
-        """Слушает RTP до timeout, собирает полную картинку (IDR) и декодит в JPEG.
-
-        Возвращает bytes (JPEG) при успехе или None, если поток не пошёл/нет IDR
-        (сервер не стартует RTP — обычный случай без точной подписки).
-
-        Полная сборка: корректно обрабатываются одиночные NAL, STAP-A и
-        фрагментация FU-A (сегменты сливаются по временному маркеру RTP).
-        """
-        if not self.sock:
-            self.bind(0)
-        if not self.port:
-            return None
-        if kick:
-            self._kick()
-        for picture, got_idr in self._iter_frames(timeout):
-            if picture and got_idr:
+            # Если пришёл маркер конца пакета и в текущем кадре есть ключевой кадр IDR —
+            # декодируем сразу, не дожидаясь смены timestamp
+            if marker and picture and got_idr:
                 jpg = self._feed_picture(picture)
                 if jpg:
                     return jpg
+        # финальная попытка
+        if picture and got_idr:
+            jpg = self._feed_picture(picture)
+            if jpg:
+                return jpg
         return None
 
     def close(self):
@@ -278,204 +269,3 @@ class RtpStream:
             except Exception:
                 pass
             self.sock = None
-
-
-class LiveStream:
-    """Непрерывный UDP/RTP-приёмник камеры, отдающий свежие JPEG по мере поступления.
-
-    Это «продлеваемый» вариант RtpStream.grab_jpeg: вместо «послушал timeout и
-    вернул один кадр» он держит UDP-сессию открытой окно retry_interval и через
-    on_frame отдаёт каждый новый собранный IDR. Если сервер замолчал (за
-    retry_interval не пришло ни одного полного IDR), сессия переоткрывается:
-    close -> заново bind и _kick (запускающий подписочный пакет).
-
-    Использование (в executor-потоке, не на event loop HA):
-        live = LiveStream(settings)
-        live.run(on_frame=cb, stop=event)   # блокирует до stop/итога
-    """
-
-    def __init__(self, settings, retry_interval=LIVE_RETRY_INTERVAL):
-        self.settings = settings or {}
-        self.retry_interval = retry_interval
-
-    def run(self, on_frame, total=LIVE_SESSION_TTL, stop=None):
-        """Циклически открывает RTP-сессию и зовёт on_frame(jpg) на каждый кадр.
-
-        Возвращается после истечения total или установки stop (Event). Каждый
-        цикл длится retry_interval: открываем свежий сокет, кикаем, собираем
-        кадры; по таймауту цикла переоткрываемся — это и есть «переустановка
-        сессии» при уходе UDP-потока.
-        """
-        start = time.time()
-        while _is_set(stop) is False:
-            if time.time() - start >= total:
-                break
-            stream = RtpStream(self.settings)
-            stream.bind(0)
-            stream._kick()
-            try:
-                for picture, got_idr in stream._iter_frames(self.retry_interval, stop=stop):
-                    if picture and got_idr:
-                        jpg = stream._feed_picture(picture)
-                        if jpg:
-                            on_frame(jpg)
-            finally:
-                stream.close()
-
-
-class StreamManager:
-    """Менеджер живых RTP-сессий с лимитом одновременных потоков и шарингом.
-
-    Решает две проблемы из SPEC-002:
-      1. Лимит активных видео-сессий на сервере здания — ведём бюджет
-         max_concurrent: если он исчерпан, выселяем самый давний сеанс (LRU).
-      2. Несколько зрителей одной камеры — ОДИН сетевой источник на всех
-         (refcount): последний подписчик закрывает сессию и шлёт closeCamera.
-
-    Фоновый поток на активную сессию слушает UDP и обновляет latest.
-    Работает вне event loop HA. Потоко-безопасен.
-    """
-
-    def __init__(self, max_concurrent=LIVE_MAX_CONCURRENT,
-                 retry_interval=LIVE_RETRY_INTERVAL, session_ttl=LIVE_SESSION_TTL,
-                 on_release=None):
-        self._lock = threading.Lock()
-        self._sessions = {}
-        self._token = 0
-        self.max_concurrent = int(max_concurrent)
-        self.retry_interval = retry_interval
-        self.session_ttl = session_ttl
-        # opциональный колбэк при полном освобождении сессии (напр. closeCamera):
-        # вызывается как on_release(cam_id) после shutdown, вне lock.
-        self._on_release = on_release
-
-    def active_count(self) -> int:
-        """Сколько сессий сейчас открыто (в т.ч. без зрителей)."""
-        with self._lock:
-            return len(self._sessions)
-
-    def subscribe(self, cam_id: str, settings: dict) -> int:
-        """Регистрирует зрителя камеры; запускает живой поток при первом зрителе.
-
-        Возвращает токен подписки (передаётся в unsubscribe). Если активных
-        сессий уже max_concurrent — выселяется самая давняя.
-        """
-        sid = str(cam_id)
-        token = 0
-        with self._lock:
-            if len(self._sessions) >= self.max_concurrent and sid not in self._sessions:
-                self._evict_lru()
-            sess = self._sessions.get(sid)
-            if sess is None:
-                sess = _LiveSession(sid, settings)
-                self._sessions[sid] = sess
-            self._token += 1
-            token = self._token
-            sess.refs.add(token)
-            sess.bump()
-            if sess.thread is None or not sess.thread.is_alive():
-                sess.stop = threading.Event()
-                sess.thread = threading.Thread(
-                    target=self._run_session, args=(sess,), daemon=True,
-                )
-                sess.thread.start()
-        return token
-
-    def _evict_lru(self):
-        """Выселяет самую давнюю сессию и сигналит освобождение (on_release)."""
-        if not self._sessions:
-            return
-        oldest = min(self._sessions.values(), key=lambda s: s.last_access)
-        evicted_id = oldest.cam_id
-        self._shutdown_session(oldest)
-        self._sessions.pop(evicted_id, None)
-        self._notify_release([evicted_id])
-
-    def unsubscribe(self, cam_id: str, token: int):
-        """Снимает зрителя; закрывает сессию, когда зрителей не осталось."""
-        sid = str(cam_id)
-        released = []
-        with self._lock:
-            sess = self._sessions.get(sid)
-            if sess is None:
-                return
-            sess.refs.discard(token)
-            if not sess.refs:
-                self._shutdown_session(sess)
-                self._sessions.pop(sid, None)
-                released.append(sid)
-        self._notify_release(released)
-
-    def latest(self, cam_id: str) -> bytes | None:
-        """Последний готовый JPEG камеры (None, если кадр ещё не собран)."""
-        with self._lock:
-            sess = self._sessions.get(str(cam_id))
-            if sess is None:
-                return None
-            sess.bump()
-            return sess.latest
-
-    def close(self, cam_id: str | None = None):
-        """Останавливает все сессии (или одну камеру). Зовётся при выгрузке."""
-        released = []
-        with self._lock:
-            if cam_id is None:
-                ids = list(self._sessions)
-            else:
-                ids = [str(cam_id)]
-            for sid in ids:
-                sess = self._sessions.get(sid)
-                if sess is not None:
-                    self._shutdown_session(sess)
-                    self._sessions.pop(sid, None)
-                    released.append(sid)
-        self._notify_release(released)
-
-    def _run_session(self, sess):
-        def emit(jpg):
-            with self._lock:
-                sess.latest = jpg
-                sess.bump()
-
-        live = LiveStream(sess.settings, retry_interval=self.retry_interval)
-        live.run(on_frame=emit, total=self.session_ttl, stop=sess.stop)
-        # поток-приёмник завершился (TTL/stop) без зрителей — сама сессия пока
-        # остаётся в _sessions; уборку сделает unsubscribe/close/LRU.
-
-    def _shutdown_session(self, sess):
-        if sess.stop is not None:
-            sess.stop.set()
-        sess.refs.clear()
-
-    def _notify_release(self, released):
-        if not released or self._on_release is None:
-            return
-        cb = self._on_release
-        for sid in released:
-            try:
-                cb(sid)
-            except Exception:  # pragma: no cover — не роняем управление
-                _LOGGER.warning("Аквилон: on_release(%s) упал", sid, exc_info=True)
-
-
-def _is_set(ev) -> bool:
-    """Безопасная проверка threading.Event (None = не останавливать)."""
-    return ev is not None and ev.is_set()
-
-
-class _LiveSession:
-    """Внутреннее состояние одной живой сессии камеры (не для прямого вызова)."""
-
-    __slots__ = ("cam_id", "settings", "refs", "thread", "stop", "latest", "last_access")
-
-    def __init__(self, cam_id, settings):
-        self.cam_id = cam_id
-        self.settings = settings
-        self.refs = set()
-        self.thread = None
-        self.stop = threading.Event()
-        self.latest = None
-        self.last_access = time.monotonic()
-
-    def bump(self):
-        self.last_access = time.monotonic()

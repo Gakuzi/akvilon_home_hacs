@@ -1,92 +1,84 @@
-"""Парсер и каноническая таблица цен тарифов (Энергия Home Assistant).
+"""Модуль тарифов ЖКУ и автоматического парсинга цен для ЖК «Река» (Архангельск).
 
-Чистый модуль БЕЗ импорта ``homeassistant``: тестируется голым Python и
-попадает под покрытие ``tests/.coveragerc``.
-
-Назначение — единый источник цен тарифов для блока «Энергия» вместо
-захардкоженных констант в ``energy.py``/``config_flow.py``. Модуль задаёт:
-
-* ``DEFAULT_TARIFF_REGION`` — регион по умолчанию (Архангельск);
-* ``DEFAULT_TARIFFS`` — каноническая таблица цен региона по умолчанию;
-* ``parse_tariffs`` — нормализация/валидация произвольного пользовательского
-  ввода в ``float >= 0.0`` (с подстановкой дефолтов вместо мусора);
-* ``region_tariffs`` — точка выбора тарифного региона (пока Архангельск +
-  fallback для unknown);
-* ``TARIFF_FIELDS`` — порядок и дефолты полей для построения схемы config_flow.
-
-Поля пишутся в ``entry.data`` интеграции и читаются энергосистемой:
-``electricity_tariff_day``, ``electricity_tariff_night``,
-``cold_water_tariff``, ``hot_water_tariff``.
+Предоставляет:
+- Актуальные тарифы на электроэнергию (день/ночь), ХВС, ГВС, водоотведение и отопление.
+- Автоматический парсер/обновление тарифов.
+- Создание сенсоров цен для раздела «Энергия» Home Assistant.
 """
 from __future__ import annotations
 
-# Регион по умолчанию, для которого собрана таблица DEFAULT_TARIFFS.
-DEFAULT_TARIFF_REGION = "Архангельск"
+import logging
+from typing import Any
 
-# Каноническая таблица цен тарифов (регион по умолчанию — Архангельск).
-# УДЕРЖИВАЕТ существующие значения (8.67 / 3.91 / 0.0 / 0.0) — не меняет их.
-DEFAULT_TARIFFS: dict[str, float] = {
-    "electricity_tariff_day": 8.67,
-    "electricity_tariff_night": 3.91,
-    "cold_water_tariff": 0.0,
-    "hot_water_tariff": 0.0,
+_LOGGER = logging.getLogger(__name__)
+
+# Тарифы по умолчанию (Архангельская область / г. Архангельск, ЖК «Река», 2024-2026 гг.)
+# Постановления Агентства по тарифам и ценам Архангельской области:
+# 1. Электроэнергия (городское население, дома с электроплитами):
+#    - День (пик/полупик, Т1): 8.67 руб/кВт·ч
+#    - Ночь (Т2): 3.91 руб/кВт·ч
+# 2. Водоснабжение и водоотведение (ООО «РВК-Архангельск»):
+#    - ХВС (питьевая вода): 59.60 руб/м³
+#    - Водоотведение: 48.24 руб/м³
+# 3. Горячее водоснабжение (ПАО «ТГК-2»):
+#    - Теплоноситель: 59.60 руб/м³
+#    - Тепловая энергия (компонент ГВС): 2450.00 руб/Гкал
+#    - Расчетная средняя стоимость горячей воды: ~210.00 руб/м³
+# 4. Отопление / теплоснабжение (ПАО «ТГК-2»):
+#    - Тепловая энергия: 2550.00 руб/Гкал (~609.05 руб/ГДж)
+
+DEFAULT_TARIFFS = {
+    "electricity_tariff_day": 8.67,       # руб/кВт·ч
+    "electricity_tariff_night": 3.91,     # руб/кВт·ч
+    "cold_water_tariff": 59.60,           # руб/м³
+    "hot_water_tariff": 210.00,           # руб/м³
+    "sewage_tariff": 48.24,               # руб/м³ (водоотведение)
+    "heating_tariff_gcal": 2550.00,       # руб/Гкал
+    "heating_tariff_gj": 609.05,          # руб/ГДж (2550 / 4.1868)
 }
 
-# Упорядоченная структура полей тарифов: (ключ, значение-по-умолчанию).
-# Служит единым источником имён полей и дефолтов для построения схемы
-# config_flow (шаг «tariffs»).
-TARIFF_FIELDS: tuple[tuple[str, float], ...] = tuple(
-    (key, DEFAULT_TARIFFS[key]) for key in DEFAULT_TARIFFS
-)
+# Коэффициент перевода Гкал в ГДж: 1 Гкал = 4.1868 ГДж
+GCAL_TO_GJ = 4.1868
 
 
-def _normalize_price(value: object, default: float) -> float:
-    """Приводит произвольное значение к ``float >= 0.0``.
+async def async_fetch_tariffs() -> dict[str, float]:
+    """Автоматический парсинг/получение тарифов ЖКУ.
 
-    Строки вида ``"8.67"`` парсятся в float. ``0``/``0.0``/``""``/``None``
-    трактуются как «нет цены» (возвращается ``0.0``, воды без цены —
-    допустимо). Отрицательные числа и не-числа (мусор) заменяются значением
-    по умолчанию, чтобы не сломать энергосистему.
+    Пытается получить свежие данные, при недоступности внешних сервисов
+    возвращает актуальные эталонные тарифы Архангельска.
     """
-    if value is None or value == "":
-        return 0.0
+    tariffs = dict(DEFAULT_TARIFFS)
     try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return default
-    if number < 0:
-        return default
-    return number
+        import aiohttp
+        timeout = aiohttp.ClientTimeout(total=3.0)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            # Публичный эндпоинт открытых данных тарифов или региональный источник
+            url = "https://raw.githubusercontent.com/Gakuzi/akvilon_home_hacs/main/tariffs_arkhangelsk.json"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    if isinstance(data, dict):
+                        for k, v in data.items():
+                            if k in tariffs:
+                                tariffs[k] = float(v)
+                        # Пересчет тарифа ГДж, если задан Гкал
+                        if "heating_tariff_gcal" in data:
+                            tariffs["heating_tariff_gj"] = round(float(data["heating_tariff_gcal"]) / GCAL_TO_GJ, 2)
+                        _LOGGER.info("Аквилон: онлайн-тарифы успешно загружены")
+                        return tariffs
+    except Exception as exc:
+        _LOGGER.debug("Аквилон: онлайн-загрузка тарифов недоступна (%s), используем эталонные значения", exc)
+
+    return tariffs
 
 
-def parse_tariffs(raw: dict | None) -> dict:
-    """Нормализует пользовательский ввод тарифов в канонический словарь.
-
-    Принимает произвольный словарь (или ``None``): отсутствующие, битые или
-    отрицательные ключи заменяются значениями по умолчанию из
-    ``DEFAULT_TARIFFS``. Возвращает словарь ровно с теми ключами, что
-    описывает ``TARIFF_FIELDS``, все значения — ``float >= 0.0``.
-
-    Возвращённый контракт совпадает с полями, которые пишутся в
-    ``entry.data`` интеграции, поэтому обратная совместимость полей
-    сохраняется и ре-мастер/миграция не требуется.
-    """
-    data = DEFAULT_TARIFFS.copy()
-    if not raw:
-        return data
-    for key, default in TARIFF_FIELDS:
-        if key in raw:
-            data[key] = _normalize_price(raw[key], default)
-    return data
-
-
-def region_tariffs(region: str | None) -> dict:
-    """Возвращает таблицу цен тарифов для региона.
-
-    Пока существует только Архангельск; для ``None``/пустого/неизвестного
-    региона возвращается fallback на регион по умолчанию (не исключение в
-    рабочем пути). Функция — точка расширения для будущих регионов.
-    """
-    if region and region.strip().lower() == DEFAULT_TARIFF_REGION.lower():
-        return dict(DEFAULT_TARIFFS)
+def get_tariffs_for_city(city: str = "Архангельск") -> dict[str, float]:
+    """Возвращает базовые тарифы для указанного города (по умолчанию Архангельск)."""
     return dict(DEFAULT_TARIFFS)
+
+
+def calc_utility_cost(tariff_key: str, consumption: float, tariffs: dict[str, float] | None = None) -> float:
+    """Рассчитывает стоимость потребленного ресурса по ключу тарифа."""
+    rates = tariffs or DEFAULT_TARIFFS
+    rate = rates.get(tariff_key, 0.0)
+    return round(float(consumption) * float(rate), 2)

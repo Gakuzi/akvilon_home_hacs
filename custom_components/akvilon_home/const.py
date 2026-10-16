@@ -1,11 +1,10 @@
 """Константы интеграции Аквилон InHome.
 
 Реальные данные камер/калиток собраны из работающего приложения в эмуляторе.
-Видео всех камер идёт через сервер здания 127.0.0.1 на разных UDP-портах с токеном.
+Видео всех камер идёт через сервер здания 91.122.221.217 на разных UDP-портах с токеном.
 """
 
 DOMAIN = "akvilon_home"
-# frigate_detect — отдельная платформа (паттерн binary_sensor) с `async_setup_entry`
 PLATFORMS = ["camera", "button", "sensor", "binary_sensor"]
 
 CONF_HOST = "host"
@@ -14,53 +13,18 @@ CONF_TOKEN = "token"
 CONF_DEVICE_ID = "device_id"
 CONF_SERVER_ID = "server_id"
 CONF_NAME = "name"
+CONF_FAVORITE_CAMERAS = "favorite_cameras"
 
 # Заголовок по умолчанию для Config Entry
 DEFAULT_NAME = "Аквилон InHome"
-DEFAULT_DEVICE_ID = "0:0"
-DEFAULT_SERVER_ID = "0:0"
+DEFAULT_DEVICE_ID = "34:50957"
+DEFAULT_SERVER_ID = "7:48390"
 
 # Сервер здания (реальный, из строки подключения)
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "91.122.221.217"
 DEFAULT_PORT = 19090
-VIDEO_TOKEN = "token_0:0"  # токен для всех видео-RTP потоков
-SIGN_KEY_HEX = "SUID_PLACEHOLDER"  # SUID building
-
-# Живой видеопоток (LiveStream/StreamManager в rtp_stream.py)
-# Лимит одновременных видео-сессий на сервере здания: не держим N потоков вечно.
-LIVE_MAX_CONCURRENT = 2
-# Срок жизни одной живой сессии перед авто-закрытием, сек.
-LIVE_SESSION_TTL = 600.0
-# Интервал переоткрытия сессии, если UDP-поток замолчал, сек.
-LIVE_RETRY_INTERVAL = 30.0
-# базовый URL живого окна viewer (заполняется при старте ViewerServer)
-VIEWER_BASE_PORT = 8090
-
-# --- go2rtc/WebRTC (живой поток домофона/камер, ОПЦИОНАЛЬНАЯ внешняя зависимость) ---
-# go2rtc — внешний аддон/процесс; интеграция лишь даёт пользователю готовую
-# конфигурацию и сервисы, НЕ содержит go2rtc и не ломается при его отсутствии.
-CONF_GO2RTC_ENABLED = "go2rtc_enabled"
-CONF_GO2RTC_BASE_URL = "go2rtc_base_url"
-CONF_GO2RTC_PORT = "go2rtc_port"
-DEFAULT_GO2RTC_PORT = 1984
-DEFAULT_GO2RTC_BASE_URL = "http://127.0.0.1:1984"
-# таймаут UDP-входа ffmpeg-источника go2rtc (мс); стандарт ~2М = 33 мин.
-DEFAULT_GO2RTC_TIMEOUT_MS = 2000000
-# префикс имени потока go2rtc для камер Аквилон (чтобы не пересекаться с чужими)
-GO2RTC_STREAM_PREFIX = "akvilon_"
-
-# --- Frigate-детекция (живой человек у домофона, ОПЦИОНАЛЬНАЯ внешняя зависимость) ---
-# Frigate — внешний процесс (64-bit host). Интеграция отдаёт контракт-настройку
-# и binary_sensor'ы, тянуть Frigate в HACS-копию не требуется.
-CONF_FRIGATE_ENABLED = "frigate_enabled"
-CONF_FRIGATE_BASE_URL = "frigate_base_url"
-CONF_FRIGATE_API_URL = "frigate_api_url"
-CONF_FRIGATE_MQTT_TOPIC = "frigate_mqtt_topic"
-CONF_FRIGATE_LABELS = "frigate_labels"
-DEFAULT_FRIGATE_BASE_URL = "http://127.0.0.1:5000"
-DEFAULT_FRIGATE_API_URL = "http://127.0.0.1:5000/api"
-DEFAULT_FRIGATE_MQTT_TOPIC = "frigate/events"
-DEFAULT_FRIGATE_LABELS = "person"
+VIDEO_TOKEN = "token_34:50957"  # токен для всех видео-RTP потоков
+SIGN_KEY_HEX = "fec8df007bfd4e368d92a67a152840df"  # SUID building
 
 # Каналы протокола (из нативки libInHome)
 CHANNEL_CAMERAS = 0x10401    # список камер
@@ -141,61 +105,3 @@ METERS = [
 SIGN_START = 0x2E
 SIGN_LEN = 0x12
 GATE_OPEN_DELAY = 5
-
-
-def _devid(kind: str, oid: str) -> tuple:
-    """Стабильный identifier устройства: (DOMAIN, <kind>, <oid>).
-    kind: server|camera|gate|intercom|meter.
-    """
-    oid = str(oid or "").strip() or "unknown"
-    return (DOMAIN, kind, oid)
-
-
-def server_dev_id() -> tuple:
-    return _devid("server", "1")
-
-
-def camera_dev_id(cam_id) -> tuple:
-    return _devid("camera", cam_id)
-
-
-def gate_dev_id(gate_id) -> tuple:
-    return _devid("gate", gate_id)
-
-
-def intercom_dev_id(ic_id) -> tuple:
-    return _devid("intercom", ic_id)
-
-
-def meter_dev_id(device_number) -> tuple:
-    return _devid("meter", device_number)
-
-
-def go2rtc_stream_name(cam_id: str) -> str:
-    """Стабильное имя потока go2rtc для камеры.
-
-    go2rtc-имя должно быть уникальным в рамках всех источников и не содержать
-    спецсимволов URL — используем префикс + безопасный id (числа/двоеточия).
-    """
-    return GO2RTC_STREAM_PREFIX + str(cam_id).replace(":", "_")
-
-
-# ---------------------------------------------------------------------------
-# Пуш-звонок домофона (Feature C)
-# ---------------------------------------------------------------------------
-# Название HA-события, эмитируемого при вызове домофона (публичный контракт).
-# Пользователь слушает его в автоматизации, например:
-#   trigger: platform: event, event_type: akvilon_home_ding
-EVENT_DING = "akvilon_home_ding"
-# Имя сервиса пуш-уведомления о вызове (вызывается из автоматизации).
-SERVICE_DING_NOTIFY = "ding_notify"
-# payload["type"] события при вызове.
-DING_TYPE_CALL = "call"
-# Каналы, по которым сервер может прислать событие вызова домофона
-# (кандидаты; на этом здании канал домофонов 0x10403 пуст — детектор просто
-# ничего не распознает, это безопасная деградация, а не ошибка).
-DING_WATCH_CHANNELS = (0x10403, 0x30301, 0x200)
-# Ключи JSON-полей пакета, по которым эвристически распознаём «вызов».
-# Консервативная эвристика: если сервер отдаёт неизвестный формат — детектор
-# вернёт None и ничего не эмитит (см. ding.classify_incoming).
-DING_CALL_KEYS = ("call", "calling", "callStatus", "vcall", "intercom_call", "ring")

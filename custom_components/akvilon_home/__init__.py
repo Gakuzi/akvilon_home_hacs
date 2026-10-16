@@ -10,7 +10,7 @@
 2. configuration.yaml (устаревший, для совместимости):
    ```yaml
    akvilon_home:
-     host: "127.0.0.1"
+     host: "91.122.221.217"
      port: 19090
    ```
    Работает по-старому через async_setup. При желании конфиг из yaml можно
@@ -34,21 +34,11 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_SERVER_ID,
     CONF_NAME,
-    CONF_GO2RTC_ENABLED,
-    CONF_GO2RTC_BASE_URL,
-    CONF_FRIGATE_ENABLED,
-    CONF_FRIGATE_BASE_URL,
-    CONF_FRIGATE_API_URL,
-    CONF_FRIGATE_LABELS,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_NAME,
     DEFAULT_DEVICE_ID,
     DEFAULT_SERVER_ID,
-    DEFAULT_GO2RTC_BASE_URL,
-    DEFAULT_FRIGATE_BASE_URL,
-    DEFAULT_FRIGATE_API_URL,
-    DEFAULT_FRIGATE_LABELS,
     CAMERAS,
     GATES,
     METERS,
@@ -58,7 +48,6 @@ from .button import AkvilonGateButton
 from .sensor import AkvilonMeterSensor, AkvilonGateSensor
 from .binary_sensor import AkvilonOnlineSensor
 from .coordinator import AkvilonHub
-from .viewer import ViewerServer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -98,106 +87,129 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         name=entry.data.get(CONF_NAME, DEFAULT_NAME),
     )
     hub.selected = entry.data.get("selected")  # список выбранных устройств
+    hub.favorite_cameras = set(entry.options.get("favorite_cameras", entry.data.get("favorite_cameras", [])))
+    entry.async_on_unload(entry.add_update_listener(async_update_options))
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = hub
     _LOGGER.info(
-        "Аквилон: setup_entry name='%s' host=%s:%s selected=%s",
-        entry.title, hub.host, hub.port, hub.selected,
+        "Аквилон: setup_entry name='%s' host=%s:%s selected=%s favorites=%s",
+        entry.title, hub.host, hub.port, hub.selected, hub.favorite_cameras,
     )
 
-    # ---- сервисы управления веб-панелью камер (viewer) ----
-    async def _async_start_viewer(call):
-        port = call.data.get("port", 8090)
-        refresh = call.data.get("refresh", 12)
-        v = ViewerServer(hub, port=port, refresh=refresh)
-        await hass.async_add_executor_job(v._start)
-        hass.data.setdefault("akvilon_viewers", {})[entry.entry_id] = v
-        _LOGGER.info("Аквилон: веб-панель камер запущена на порту %d", port)
+    # Домофон: сервисы действий при входящем вызове.
+    async def _handle_open_gate(call):
+        gate_id = call.data.get("gate_id", "")
+        if not gate_id:
+            raise vol.Invalid("gate_id обязателен")
+        ok = await hass.async_add_executor_job(hub.open_gate, str(gate_id))
+        return {"ok": ok}
 
-    async def _async_stop_viewer(call):
-        v = hass.data.get("akvilon_viewers", {}).pop(entry.entry_id, None)
-        if v:
-            await hass.async_add_executor_job(v._stop)
-            _LOGGER.info("Аквилон: веб-панель камер остановлена")
+    async def _handle_intercom_answer(call):
+        cam_id = str(call.data.get("camera_id", ""))
+        gate_id = str(call.data.get("gate_id", ""))
+        if not cam_id:
+            call_data = hub.active_call or {}
+            cam_id = str(call_data.get("camId") or call_data.get("cameraId") or call_data.get("id") or "")
+        if not cam_id:
+            raise vol.Invalid("camera_id обязателен (или активен входящий вызов)")
+        res = await hass.async_add_executor_job(hub.intercom_answer, cam_id, gate_id)
+        return res
 
-    hass.services.async_register(DOMAIN, "start_viewer", _async_start_viewer)
-    hass.services.async_register(DOMAIN, "stop_viewer", _async_stop_viewer)
+    async def _handle_intercom_accept_audio(call):
+        cam_id = str(call.data.get("camera_id", ""))
+        if not cam_id:
+            call_data = hub.active_call or {}
+            cam_id = str(call_data.get("camId") or call_data.get("cameraId") or call_data.get("id") or "")
+        if not cam_id:
+            raise vol.Invalid("camera_id обязателен")
+        res = await hass.async_add_executor_job(hub.intercom_accept_audio, cam_id)
+        return res
 
-    # ---- сервисы go2rtc/WebRTC (живой поток домофона/камер, опционально) ----
-    from . import go2rtc as _go2rtc
+    async def _handle_intercom_unlock(call):
+        gate_id = str(call.data.get("gate_id", ""))
+        if not gate_id:
+            call_data = hub.active_call or {}
+            # берём калитку, связанную с активным вызовом
+            link = {}
+            cam_id = str(call_data.get("camId") or call_data.get("cameraId") or "")
+            for g in hub._gates:
+                if str(g.get("cameraId") or "") == cam_id:
+                    gate_id = str(g.get("objectid") or g.get("objectId") or "")
+                    break
+        if not gate_id:
+            raise vol.Invalid("gate_id обязателен")
+        ok = await hass.async_add_executor_job(hub.intercom_unlock, str(gate_id))
+        return {"ok": ok}
 
-    def _hub_for_entry():
-        return hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    async def _handle_voice_mic(call):
+        """Управление микрофоном активного голосового канала (аналог setMicIsOn)."""
+        on = bool(call.data.get("mic_on", True))
+        volume = call.data.get("volume")
+        if volume is not None:
+            volume = float(volume)
+        ok = await hass.async_add_executor_job(hub.voice_set_mic, on, volume)
+        return {"mic_on": ok, "voice_active": hub.voice_active}
 
-    def _camera_ids_for_media(hub_obj) -> list[str]:
-        """Ид камер для go2rtc/Frigate: приоритет — камеры домофонов, фолбэк — все."""
-        intercoms = getattr(hub_obj, "intercoms", None) or []
-        ids = [str(i.get("cameraId") or "") for i in intercoms if str(i.get("cameraId") or "") not in ("", "0:-1")]
-        if not ids:
-            ids = [str(c.get("objectid") or c.get("objectId") or "")
-                   for c in (getattr(hub_obj, "cameras", None) or [])]
-        return list(dict.fromkeys(x for x in ids if x))
+    async def _handle_voice_stop(call):
+        """Закрыть голосовой канал (положить трубку)."""
+        await hass.async_add_executor_job(hub._close_voice)
+        return {"voice_active": hub.voice_active}
 
-    async def _async_go2rtc_config(call):
-        """Возвращает готовый YAML-блок ``streams:`` для go2rtc.yaml."""
-        hub = _hub_for_entry()
-        if hub is None:
-            return {"error": "hub unavailable"}
-        py = call.data.get("python", "python3")
-        only = str(call.data.get("cam_id") or "").strip()
-        specs = []
-        for cid in _camera_ids_for_media(hub):
-            if only and cid != only:
-                continue
-            specs.append({
-                "cam_id": cid,
-                "settings": (hub._video_settings or {}).get(cid) or {},
-            })
-        if not specs:
-            return {"error": "no cameras"}
-        yaml_block = _go2rtc.build_config(
-            specs,
-            host=hub.host, port=hub.port,
-            passwd=hub.token, device_id=hub.device_id, server_id=hub.server_id,
-            python=py,
-        )
-        return {"cameras": len(specs), "yaml": yaml_block}
-
-    async def _async_go2rtc_stream_url(call):
-        """Возвращает webrtc-адрес потока для карточки custom:webrtc-camera."""
-        hub = _hub_for_entry()
-        if hub is None:
-            return {"error": "hub unavailable"}
-        cid = str(call.data.get("cam_id") or "").strip()
-        base = str(call.data.get("base_url") or
-                   (dict(entry.options or {}).get(CONF_GO2RTC_BASE_URL) or DEFAULT_GO2RTC_BASE_URL))
-        if not cid:
-            return {"error": "cam_id required"}
-        return {
-            "cam_id": cid,
-            "stream": _go2rtc.go2rtc_stream_name(cid),
-            "webrtc_url": _go2rtc.webrtc_url(base, cid),
-            "api_url": _go2rtc.api_stream_url(base, cid),
+    async def _handle_simulate_call(call):
+        """Симуляция входящего вызова домофона для проверки автоматизаций и всплывающего окна."""
+        gate_id = str(call.data.get("gate_id") or "2:80649")
+        cam_id = str(call.data.get("camera_id") or "117:69858")
+        call_payload = {
+            "call": "incoming",
+            "gate_id": gate_id,
+            "camera_id": cam_id,
+            "caller": "Вход / Калитка 6",
+            "time": time.time(),
         }
+        hub._set_call(call_payload)
+        for cb in list(hub._call_listeners):
+            try:
+                cb(call_payload)
+            except Exception:
+                pass
+        return {"ok": True, "call": call_payload}
 
-    async def _async_go2rtc_proxy_cmd(call):
-        """Возвращает ``exec:``-команду для go2rtc (диагностика/ручная настройка)."""
-        hub = _hub_for_entry()
-        if hub is None:
-            return {"error": "hub unavailable"}
-        cid = str(call.data.get("cam_id") or "").strip()
-        if not cid:
-            return {"error": "cam_id required"}
-        py = call.data.get("python", "python3")
-        return {
-            "cam_id": cid,
-            "exec": _go2rtc.build_exec_cmd(
-                cid, hub.host, hub.port, hub.token, hub.device_id, hub.server_id, py,
-            ),
-        }
+    async def _handle_clear_call(call):
+        """Сброс активного вызова."""
+        hub.clear_call()
+        for cb in list(hub._call_listeners):
+            try:
+                cb(None)
+            except Exception:
+                pass
+        return {"ok": True}
 
-    hass.services.async_register(DOMAIN, "go2rtc_config", _async_go2rtc_config)
-    hass.services.async_register(DOMAIN, "go2rtc_stream_url", _async_go2rtc_stream_url)
-    hass.services.async_register(DOMAIN, "go2rtc_proxy_cmd", _async_go2rtc_proxy_cmd)
+    async def _handle_set_favorite_camera(call):
+        """Добавить или удалить камеру из избранных."""
+        cam_id = str(call.data.get("camera_id", ""))
+        fav = bool(call.data.get("favorite", True))
+        if cam_id:
+            hub.set_favorite_camera(cam_id, fav)
+            new_favs = list(hub.favorite_cameras)
+            new_options = dict(entry.options)
+            new_options["favorite_cameras"] = new_favs
+            hass.config_entries.async_update_entry(entry, options=new_options)
+        return {"favorite_cameras": list(hub.favorite_cameras)}
+
+    async def _handle_refresh(call):
+        """Принудительно обновить списки и данные с сервера."""
+        await hass.async_add_executor_job(hub.refresh)
+        return {"ok": True}
+
+    hass.services.async_register(DOMAIN, "open_gate", _handle_open_gate)
+    hass.services.async_register(DOMAIN, "intercom_answer", _handle_intercom_answer)
+    hass.services.async_register(DOMAIN, "intercom_accept_audio", _handle_intercom_accept_audio)
+    hass.services.async_register(DOMAIN, "intercom_unlock", _handle_intercom_unlock)
+    hass.services.async_register(DOMAIN, "voice_mic", _handle_voice_mic)
+    hass.services.async_register(DOMAIN, "voice_stop", _handle_voice_stop)
+    hass.services.async_register(DOMAIN, "simulate_call", _handle_simulate_call)
+    hass.services.async_register(DOMAIN, "clear_call", _handle_clear_call)
+    hass.services.async_register(DOMAIN, "set_favorite_camera", _handle_set_favorite_camera)
+    hass.services.async_register(DOMAIN, "refresh", _handle_refresh)
 
     # Устанавливаем флаг "setup завершается фоном" — создаём сущности,
     # как только сервер ответит данными, НЕ блокируя загрузку HA.
@@ -211,41 +223,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as exc:  # pragma: no cover
             _LOGGER.warning("Аквилон: первичная загрузка данных не удалась: %s", exc)
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-        # Авто-запуск веб-панели камер (viewer) на порту 8090 — чтобы панель
-        # сразу работала после настройки, без ручного сервиса start_viewer.
-        try:
-            if entry.data.get("start_viewer", True):
-                v = ViewerServer(hub, port=8090, refresh=12)
-                await hass.async_add_executor_job(v._start)
-                hass.data.setdefault("akvilon_viewers", {})[entry.entry_id] = v
-                _LOGGER.info("Аквилон: веб-панель камер авто-запущена на порту 8090")
-        except Exception as exc:  # pragma: no cover
-            _LOGGER.warning("Аквилон: не удалось авто-запустить viewer: %s", exc)
-        # Интегрируем счётчики в «Энергию» (после создания сущностей).
-        try:
-            from .energy import async_setup_energy
-            await async_setup_energy(hass, entry)
-        except Exception as exc:  # pragma: no cover
-            _LOGGER.warning("Аквилон: не удалось настроить энергосистему: %s", exc)
-        # Пуш-звонок домофона (Feature C): сервис ding_notify + слушатель вызова.
-        try:
-            from .ding import async_setup_ding
-            listener = await async_setup_ding(hass, hub)
-            if listener is not None:
-                hub.set_ding_listener(listener)
-        except Exception as exc:  # pragma: no cover
-            _LOGGER.warning("Аквилон: не удалось настроить пуш-звонок домофона: %s", exc)
-        # Создаём/обновляем дашборд «Аквилон». Сущности регистрируются асинхронно,
-        # поэтому пересобираем панель несколько раз с паузой, чтобы успеть собрать
-        # реальные entity_id (иначе первый запуск видит пустой registry).
+        # Создаём/обновляем дашборд «Аквилон» после появления сущностей.
         try:
             from .dashboard import ensure_dashboard
             await hass.async_add_executor_job(ensure_dashboard, hass, hub)
-            for _ in range(3):
-                await asyncio.sleep(2)
-                await hass.async_add_executor_job(ensure_dashboard, hass, hub)
         except Exception as exc:  # pragma: no cover
             _LOGGER.warning("Аквилон: не удалось настроить дашборд: %s", exc)
+
+        # Автоматическая настройка раздела «Энергия»
+        try:
+            from .energy import async_configure_energy_dashboard
+            await async_configure_energy_dashboard(hass, entry, hub)
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.warning("Аквилон: не удалось настроить раздел «Энергия»: %s", exc)
 
     hass.loop.create_task(_setup_after_data())
     # Периодическое обновление данных с сервера (камеры/калитки/счётчики/домофоны)
@@ -294,10 +284,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Выгрузить интеграцию (удаляет сущности и закрывает соединение)."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    # остановить веб-панель камер, если запущена
-    v = hass.data.get("akvilon_viewers", {}).pop(entry.entry_id, None)
-    if v is not None:
-        await hass.async_add_executor_job(v._stop)
     hub = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     if hub is not None:
         await hass.async_add_executor_job(hub.close)
@@ -316,7 +302,16 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await async_setup_entry(hass, entry)
 
 
-
+async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Обновляет настройки интеграции при сохранении опций."""
+    hub = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if hub:
+        hub.favorite_cameras = set(entry.options.get("favorite_cameras", []))
+    try:
+        from .dashboard import ensure_dashboard
+        await hass.async_add_executor_job(ensure_dashboard, hass, hub)
+    except Exception as exc:  # pragma: no cover
+        _LOGGER.warning("Аквилон: не удалось обновить дашборд: %s", exc)
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Миграция конфигурации со старой версии (1) на новую (2).
@@ -334,16 +329,9 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     new_data.setdefault("electricity_tariff_night", 3.91)
     new_data.setdefault("cold_water_tariff", 0.0)
     new_data.setdefault("hot_water_tariff", 0.0)
-    # Опции go2rtc/WebRTC и Frigate (актуально для старых entry без этих полей).
-    new_data.setdefault(CONF_GO2RTC_ENABLED, False)
-    new_data.setdefault(CONF_GO2RTC_BASE_URL, DEFAULT_GO2RTC_BASE_URL)
-    new_data.setdefault(CONF_FRIGATE_ENABLED, False)
-    new_data.setdefault(CONF_FRIGATE_BASE_URL, DEFAULT_FRIGATE_BASE_URL)
-    new_data.setdefault(CONF_FRIGATE_API_URL, DEFAULT_FRIGATE_API_URL)
-    new_data.setdefault(CONF_FRIGATE_LABELS, DEFAULT_FRIGATE_LABELS)
-    entry.data = new_data
-    entry.version = 2
-    entry.minor_version = 1
+    hass.config_entries.async_update_entry(
+        entry, data=new_data, version=2, minor_version=1
+    )
     return True
 
 

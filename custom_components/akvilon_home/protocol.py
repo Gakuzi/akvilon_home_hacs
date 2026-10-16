@@ -7,7 +7,7 @@
     0x00..0x07  магия 04 10 01 00 02 00 05 00
     0x08..0x09  subheader 10 00
     0x0a..0x0d  sequence (4 байта LE)
-    0x0e..0x1d  dst A7ID (DeviceId, напр. 0:0)
+    0x0e..0x1d  dst A7ID (DeviceId, напр. 34:50957)
     0x1e..0x2d  src A7ID (реально 0:1 для устройства)
     0x2e..0x35  stateTime (qint64 ms; для GET=0)
     0x36        cmd (1=GET, 2=данные, 3=EVENT)
@@ -74,8 +74,8 @@ def parse_qr(qr: str) -> dict:
     """Разбирает QR-строку подключения Аквилон (формат застройщика).
 
     Поддерживает два разделителя: 'КЛЮЧ=ЗНАЧЕНИЕ' и пары 'КЛЮЧ;ЗНАЧЕНИЕ'
-    (как в реальной строке: CLEVERB;CODE;00000;VERSION;3;DEVICEID;0:0;
-    PASS;PASS_PLACEHOLDER;UDP;127.0.0.1;19090;SERVERID;0:0;SUID;deadbeef...).
+    (как в реальной строке: CLEVERB;CODE;71825;VERSION;3;DEVICEID;34:50957;
+    PASS;9c5edcb9;UDP;91.122.221.217;19090;SERVERID;7:48390;SUID;fec8df...).
     Возвращает dict: HOST, PORT, DEVICE_ID, SERVER_ID, PASS (str), SUID, TOKEN(bytes).
     """
     out = {}
@@ -183,7 +183,7 @@ def build_header(cmd, flag, seq, channel, state_number=0, state_time=0,
     """Строит 64-байтовый header пакет.
 
     src_id/dst_id — строки 'flag:id'. По реальному трафику:
-    src='0:1', dst=DeviceId ('0:0'). Без них сервер не принимает.
+    src='0:1', dst=DeviceId ('34:50957'). Без них сервер не принимает.
     """
     hdr = bytearray(64)
     struct.pack_into("<Q", hdr, 0x00, MAGIC)
@@ -206,15 +206,6 @@ def build_header(cmd, flag, seq, channel, state_number=0, state_time=0,
 def sign_packet(header, payload, token: bytes) -> bytes:
     """MD5(header[0x2e:0x40] + payload + token)."""
     return hashlib.md5(header[SIGN_START:SIGN_START + SIGN_LEN] + payload + token).digest()
-
-
-def _safe_str(v):
-    """Безопасное строковое представление значения (для ключей/логов)."""
-    if v is None:
-        return ""
-    if isinstance(v, (dict, list, tuple, set)):
-        return str(v)[:200]
-    return str(v)
 
 
 def get_list_payload(req_type=1, object_id=-1, flag=0, counter=0):
@@ -240,12 +231,12 @@ def get_list_payload(req_type=1, object_id=-1, flag=0, counter=0):
 class AkvilonClient:
     """UDP-клиент к серверу здания."""
 
-    def __init__(self, host, port, token_hex, device_id="0:0", server_id="0:0",
-                 device_flag=119, pass_hex="PASS_PLACEHOLDER"):
+    def __init__(self, host, port, token_hex, device_id="34:50957", server_id="7:48390",
+                 device_flag=119, pass_hex="9c5edcb9"):
         self.host = host
         self.port = port
-        # Секрет подписи = PASS из QR (напр. PASS_PLACEHOLDER), а не SUID.
-        # ВАЖНО: в MD5 участвует АСКИ-строка "PASS_PLACEHOLDER", а НЕ hex-байты 0x9C 0x5E 0xDC 0xB9.
+        # Секрет подписи = PASS из QR (напр. 9c5edcb9), а не SUID.
+        # ВАЖНО: в MD5 участвует АСКИ-строка "9c5edcb9", а НЕ hex-байты 0x9C 0x5E 0xDC 0xB9.
         # Проверено по трафику: MD5(header[0x2e:0x40]+payload+ASCII(PASS)) — совпадает с приложением.
         self.token = pass_hex.encode("ascii") if pass_hex else b""
         # src для устройства всегда '0:1', dst = DeviceId
@@ -255,15 +246,9 @@ class AkvilonClient:
         self.seq = 0
         self.sock = None
         self.keepalive_timer = None
-        self.keepalive_thread = None
         self._running = False
         self._inbox = []
         self._inbox_lock = threading.Lock()
-        # Один поток последовательно пишет в сокет: ридер (ACK), keepalive и
-        # основной поток get_list делят self.seq и сокет. Блокировка защищает
-        # и порядковые номера, и целостность датаграмм (без неё seq мог бы
-        # «разъехаться» между потоками, и сервер бы отбрасывал пакеты).
-        self._send_lock = threading.Lock()
         # Побочные очереди по каналу: НА них работает всё чтение get_list.
         # Единственный поток (фоновый ридер) владеет сокетом и раскладывает
         # входящие пакеты по очередям — это устраняет гонку двух recvfrom,
@@ -271,7 +256,9 @@ class AkvilonClient:
         self._queues = {}
         self._reader_thread = None
         self.last_list_count = None
-        self._last_rx = 0.0  # monotonic-метка последнего успешного входящего пакета
+        # Колбэк на серверные push-события (входящие cmd=2/3 с JSON-телом вне
+        # запрошенных списков). Используется домофоном для входящего вызова.
+        self._push_handler = None
 
     def connect(self) -> bool:
         try:
@@ -283,29 +270,6 @@ class AkvilonClient:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.settimeout(5.0)
             return True
-        except Exception:
-            return False
-
-    def ping(self, timeout: float = 4.0) -> bool:
-        """Быстрая проверка доступности сервера: шлёт подписочный пакет и ждёт ответа.
-
-        Используется мастером настройки на шаге проверки соединения, чтобы сразу
-        понять, доступен ли сервер здания, не дожидаясь полной загрузки списков.
-        """
-        try:
-            if not self.sock:
-                self.connect()
-            if not self.sock:
-                return False
-            self.sock.settimeout(timeout)
-            # подписочный пакет на канал 0x200 (один канал) — сервер обязан ответить ACK
-            payload = struct.pack("<I", 1) + struct.pack("<II", 0x10401, 0)
-            self.sock.sendto(self._build(CMD_EVENT, 0x01, 0x200, payload),
-                             (self.host, self.port))
-            data, _ = self.sock.recvfrom(MAX_UDP)
-            return data is not None and len(data) >= MIN_PKT
-        except socket.timeout:
-            return False
         except Exception:
             return False
 
@@ -325,7 +289,6 @@ class AkvilonClient:
         при «мёртвой» сессии создаём новый сокет + подписку + регистрацию + ридер.
         """
         self._running = False
-        self._stop_keepalive()
         if self._reader_thread and self._reader_thread.is_alive():
             try:
                 self._reader_thread.join(timeout=1.0)
@@ -345,7 +308,6 @@ class AkvilonClient:
 
     def close(self):
         self._running = False
-        self._stop_keepalive()
         if self.sock:
             try:
                 self.sock.close()
@@ -355,32 +317,21 @@ class AkvilonClient:
 
 
     def _send_ack(self, hdr: bytes):
-        """ACK на входящий пакет: эхо заголовка, cmd=2, flag|=0x02.
-
-        Сервер продолжает поток частей списка ТОЛЬКО после ACK на предыдущий
-        пакет, поэтому ACK нельзя терять при перегрузке: при сбое сокета делаем
-        одну повторную попытку, прежде чем сдаться.
-        """
+        """ACK на входящий пакет: эхо заголовка, cmd=2, flag|=0x02."""
         if not self.sock:
             return
         try:
             ack = bytearray(hdr)
             ack[0x36] = CMD_DATA
             ack[0x37] |= FLAG_OK
-            pkt = bytes(ack) + sign_packet(bytes(ack), b"", self.token)
-            with self._send_lock:
-                self.sock.sendto(pkt, (self.host, self.port))
+            self.sock.sendto(bytes(ack) + sign_packet(bytes(ack), b"", self.token),
+                             (self.host, self.port))
         except Exception:
-            try:
-                with self._send_lock:
-                    self.sock.sendto(pkt, (self.host, self.port))
-            except Exception:  # pragma: no cover
-                pass
+            pass
 
     def _next_seq(self) -> int:
-        with self._send_lock:
-            self.seq += 1
-            return self.seq
+        self.seq += 1
+        return self.seq
 
     def _build(self, cmd, flag, channel, payload=b"", state_number=0, state_time=0,
                src_id=None, dst_id=None) -> bytes:
@@ -399,9 +350,8 @@ class AkvilonClient:
             return None
         try:
             self.sock.settimeout(timeout)
-            pkt = self._build(cmd, flag, channel, payload, state_number, state_time, src_id, dst_id)
-            with self._send_lock:
-                self.sock.sendto(pkt, (self.host, self.port))
+            self.sock.sendto(self._build(cmd, flag, channel, payload, state_number, state_time, src_id, dst_id),
+                             (self.host, self.port))
             data, _ = self.sock.recvfrom(MAX_UDP)
             return data
         except Exception:
@@ -421,19 +371,15 @@ class AkvilonClient:
             return b""
 
 
-    def _subscribe_payload(self) -> bytes:
-        """Payload подписки 0x200: количество каналов + пары (channel, 0)."""
+    def subscribe(self):
+        """Подписка на каналы данных (cmd=3 flag=0x01 на канал 0x200)."""
         payload = struct.pack("<I", len(SUB_CHANNELS))
         for ch in SUB_CHANNELS:
             payload += struct.pack("<I", ch) + struct.pack("<I", 0)
-        return payload
-
-    def subscribe(self):
-        """Подписка на каналы данных (cmd=3 flag=0x01 на канал 0x200)."""
-        return self.send(CMD_EVENT, 0x01, 0x200, self._subscribe_payload())
+        return self.send(CMD_EVENT, 0x01, 0x200, payload)
 
 
-    def register(self, device_uuid="2::device_uuid_placeholder"):
+    def register(self, device_uuid="2::bc6c9020029043179521d917c05504fc"):
         """Регистрация приложения на сервере (канал 0x02020001).
 
         Без неё сервер молча игнорирует GET-запросы списков.
@@ -464,43 +410,15 @@ class AkvilonClient:
             self._queues[channel] = q
         return q
 
-    def _start_keepalive(self, interval=15.0):
-        """Фоновый поток повторной подписки (0x200) каждые ~interval сек.
+    def set_push_handler(self, handler):
+        """Устанавливает колбэк на серверные push-события.
 
-        Сервер «отписывает» клиента, если долго не видит повторной подписки,
-        и перестаёт пушить. Таймер держит подписку живой на время долгих
-        GET-опросов и активных сессий. Гейтится по `_running` — при close()
-        или смене сессии останавливается.
+        handler(pkt_bytes) вызывается из фонового ридера для каждого входящего
+        пакета cmd=2/cmd=3 с JSON-телом, который НЕ является ответом на наши
+        GET/команды (не попал в очереди каналов). Используется чтобы ловить
+        входящие вызовы домофона, которые сервер пушит по своей инициативе.
         """
-        if self.keepalive_thread and self.keepalive_thread.is_alive():
-            return self.keepalive_thread
-        if not self._running or not self.sock:
-            return None
-
-        def loop():
-            while self._running and self.sock is not None:
-                time.sleep(interval)
-                if not self._running or self.sock is None:
-                    break
-                try:
-                    pkt = self._build(CMD_EVENT, 0x01, 0x200, self._subscribe_payload())
-                    with self._send_lock:
-                        self.sock.sendto(pkt, (self.host, self.port))
-                except Exception:  # pragma: no cover
-                    continue
-
-        t = threading.Thread(target=loop, daemon=True, name="akvilon-keepalive")
-        self.keepalive_thread = t
-        t.start()
-        return t
-
-    def _stop_keepalive(self):
-        if self.keepalive_thread and self.keepalive_thread.is_alive():
-            try:
-                self.keepalive_thread.join(timeout=0.5)
-            except Exception:
-                pass
-        self.keepalive_thread = None
+        self._push_handler = handler
 
     def start_reader(self):
         """Запускает ЕДИНСТВЕННЫЙ фоновый поток, который владеет сокетом.
@@ -513,7 +431,6 @@ class AkvilonClient:
         if self._reader_thread and self._reader_thread.is_alive():
             return self._reader_thread
         self._running = True
-        self._start_keepalive()
 
         def loop():
             try:
@@ -530,14 +447,30 @@ class AkvilonClient:
                 if len(d) < MIN_PKT:
                     continue
                 h = d[:HEADER_LEN]
-                self._last_rx = time.monotonic()
+                # ACK на КАЖДЫЙ входящий пакет (как рабочий прототип e2e2.py):
+                # сервер стримит большие списки частями и продолжает слать
+                # следующие части ТОЛЬКО после ACK на предыдущую. cmd=1 (ответы
+                # на GET) тоже обслуживаются — иначе поток встаёт.
                 self._send_ack(h)
                 with self._inbox_lock:
                     self._inbox.append(d)
                 ch = struct.unpack_from("<I", h, 0x38)[0]
                 q = self._queues.get(ch)
-                if q is not None:
+                routed = q is not None
+                if routed:
                     q.put(d)
+                # Push-события: сервер по своей инициативе шлёт cmd=2/3 с JSON-телом
+                # (входящий вызов домофона, смена состояния). НЕ отправляем их в
+                # очереди каналов (это не ответ на наши GET) — отдаём колбэку.
+                handler = self._push_handler
+                if handler is not None and not routed:
+                    cmd = h[0x36]
+                    pl = d[HEADER_LEN:len(d) - MD5_LEN]
+                    if cmd in (CMD_DATA, CMD_EVENT) and (pl[:1] in (b"{", b"[")):
+                        try:
+                            handler(d, ch, pl)
+                        except Exception:
+                            pass
 
         t = threading.Thread(target=loop, daemon=True)
         self._reader_thread = t
@@ -579,12 +512,8 @@ class AkvilonClient:
         payload = d[HEADER_LEN:len(d) - MD5_LEN]
         return struct.unpack_from("<I", payload, 0)[0]
 
-    def _get_header(self, channel, header_timeout=4.0, retries=2):
-        """GET-ALL на текущей сессии, возвращает (count, [(oid, rflag), ...]).
-
-        Повторяет GET-ALL при одиночной потере датаграммы (retries раз), не
-        поднимая свежую сессию — сервер обычно отвечает на повтор сразу.
-        """
+    def _get_header(self, channel, header_timeout=4.0):
+        """GET-ALL на текущей сессии, возвращает (count, [(oid, rflag), ...])."""
         self.start_reader()
         q = self._channel_queue(channel)
         try:
@@ -592,32 +521,28 @@ class AkvilonClient:
                 q.get_nowait()
         except queue.Empty:
             pass
-        for _ in range(max(1, retries + 1)):
+        self.sock.sendto(self._build(CMD_GET, 0x00, channel,
+                                     get_list_payload(1, -1, 0, 0)),
+                         (self.host, self.port))
+        deadline = time.time() + header_timeout
+        while time.time() < deadline:
             try:
-                pkt = self._build(CMD_GET, 0x00, channel, get_list_payload(1, -1, 0, 0))
-                with self._send_lock:
-                    self.sock.sendto(pkt, (self.host, self.port))
-            except Exception:
-                return None, []
-            deadline = time.time() + header_timeout / max(1, retries + 1)
-            while time.time() < deadline:
-                try:
-                    d = q.get(timeout=0.5)
-                except queue.Empty:
-                    continue
-                if self._is_header(d, channel):
-                    payload = d[HEADER_LEN:len(d) - MD5_LEN]
-                    count = struct.unpack_from("<I", payload, 0)[0]
-                    rec_total = min(count, (len(payload) - 4) // 16)
-                    ids = []
-                    for i in range(rec_total):
-                        rec = payload[4 + i * 16: 4 + (i + 1) * 16]
-                        if len(rec) < 16:
-                            continue
-                        oid = struct.unpack_from("<q", rec, 4)[0]
-                        rflag = struct.unpack_from("<I", rec, 12)[0]
-                        ids.append((oid, rflag))
-                    return count, ids
+                d = q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if self._is_header(d, channel):
+                payload = d[HEADER_LEN:len(d) - MD5_LEN]
+                count = struct.unpack_from("<I", payload, 0)[0]
+                rec_total = min(count, (len(payload) - 4) // 16)
+                ids = []
+                for i in range(rec_total):
+                    rec = payload[4 + i * 16: 4 + (i + 1) * 16]
+                    if len(rec) < 16:
+                        continue
+                    oid = struct.unpack_from("<q", rec, 4)[0]
+                    rflag = struct.unpack_from("<I", rec, 12)[0]
+                    ids.append((oid, rflag))
+                return count, ids
         return None, []
 
     def _fetch_one(self, channel, oid, rflag, idx, wait=1.6):
@@ -653,20 +578,14 @@ class AkvilonClient:
 
         Сервер объявляет в бинарном заголовке полный count (напр. 69 камер),
         но по-настоящему надёжно отдаёт тело на последовательный type=2 GET
-        (по одному, с маленькой паузой), и только ~18 тел за одну UDP-сессию.
-        Поэтому:
+        (по одному, с маленькой паузой), а не на пачку запросов. Поэтому:
 
-          * получаем полный список id из заголовка и НАКАПЛИВАЕМ id по сессиям
-            (объединение — более поздний, более полный заголовок не затирает
-            ранее известные id);
-          * запрашиваем по одному телу для каждого id (пачками по batch);
+          * получаем полный список id из заголовка;
+          * запрашиваем по одному телу для каждого id (поштучно, с паузой);
           * если за сессию что-то не пришло — повторяем недостающие в свежей
-            сессии (сервер отдаёт список снова); внутри сессии тоже повторяем
-            проспанную порцию один раз (устойчивость к одиночной потере);
-          * НЕ отдаём неполный банк как «финальный» молча: если объявленный
-            count не был собран, обязательно логируем предупреждение.
+            сессии (сервер отдаёт список снова).
 
-        Возвращаем только реально полученные объекты (в порядке появления id).
+        Возвращаем только реально полученные объекты (в порядке id).
         """
         if self.sock is None:
             self._new_session()
@@ -674,122 +593,77 @@ class AkvilonClient:
         seen = {}
         order = []
         declared_max = 0
-        known_ids = {}  # oid -> rflag, объединяем по сессиям
+        known_ids = []
 
-        start_wall = time.monotonic()
-        attempts = max(1, sessions)
-        # Общий бюджет времени: не даём get_list висеть дольше timeout даже при
-        # большом sessions (защита от «вечного» цикла на полуживом сервере).
-        budget = max(5.0, min(timeout, attempts * 12.0))
-        for attempt in range(attempts):
-            if time.monotonic() - start_wall > budget:
-                break
+        def _safe_str(v):
+            if v is None:
+                return ""
+            if isinstance(v, (dict, list, tuple, set)):
+                return str(v)[:200]
+            return str(v)
+
+        for attempt in range(max(1, sessions)):
             count, ids = self._get_header(channel)
             if count:
                 declared_max = max(declared_max, count)
-            for oid, rflag in ids:
-                known_ids.setdefault(_safe_str(oid), (oid, rflag))
-
-            # Идём от объявленного count: если запросили больше id, чем сервер
-            # реально прислал в заголовке — это уже все известные id.
-            if not known_ids:
-                # сессия не ответила заголовком — свежая сессия и повтор
-                if attempt < attempts - 1 and time.monotonic() - start_wall <= budget:
+            if ids:
+                known_ids = ids
+            missing = [(o, f) for (o, f) in known_ids if _safe_str(o) not in seen]
+            if not missing and not ids:
+                # сессия не ответила заголовком — свежая сессия
+                if attempt < sessions - 1:
                     self._new_session()
                 continue
-
-            self._collect_bank(channel, seen, order, known_ids, declared_max, batch)
+            # Пакетный сбор: шлём id группами по batch штук подряд и собираем
+            # JSON-тела. Сервер отвечает на первые ~9-18 быстро, поэтому пачек
+            # на 69 камер хватает без поштучной задержки (0.4с на камеру).
+            q = self._channel_queue(channel)
+            missing = [(o, f) for (o, f) in known_ids if _safe_str(o) not in seen]
+            for i in range(0, len(missing), batch):
+                chunk = missing[i:i + batch]
+                for idx, (oid, rflag) in enumerate(chunk):
+                    self.sock.sendto(self._build(CMD_GET, 0x00, channel,
+                                                 get_list_payload(2, oid, rflag, i + idx + 1)),
+                                     (self.host, self.port))
+                # короткая пауза между пачками, чтобы сервер успел отдать волну
+                time.sleep(0.05)
+                need = len(chunk)
+                dead = time.time() + 1.2
+                while time.time() < dead and len(seen) < declared_max:
+                    try:
+                        d = q.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
+                    if len(d) < MIN_PKT:
+                        continue
+                    p = d[HEADER_LEN:len(d) - MD5_LEN]
+                    if not (p.startswith(b'{') or p.startswith(b'[')):
+                        continue
+                    try:
+                        o = json.loads(p.decode("utf-8", "replace"))
+                    except Exception:
+                        continue
+                    if isinstance(o, dict) and o.get("objectid"):
+                        oid_s = _safe_str(o.get("objectid") or o.get("objectId"))
+                        if oid_s and oid_s not in seen:
+                            seen[oid_s] = o
+                            order.append(oid_s)
             if declared_max and len(seen) >= declared_max:
                 break
-            if all(_safe_str(o) in seen for o in list(known_ids)):
+            if known_ids and all(_safe_str(o) in seen for o, _ in known_ids):
                 break
-            if attempt < attempts - 1 and time.monotonic() - start_wall <= budget:
+            if attempt < sessions - 1:
                 self._new_session()
         result = [seen[o] for o in order]
-        self.last_list_count = declared_max or len(result)
-        if declared_max and len(result) < declared_max:
-            _LOG.warning(
-                "[akvilon_home] get_list ch=0x%X собрано %d/%d тел за %d сессий",
-                channel, len(result), declared_max, attempts,
-            )
+        self.last_list_count = declared_max
         return result
-
-    def _collect_bank(self, channel, seen, order, known_ids, declared_max, batch):
-        """Собирает JSON-тела для известных id пачками; повтор проспанного раза.
-
-        `known_ids`: dict {str_oid: (int_oid, rflag)}. Накопление (`seen`/`order`)
-        переживает сессии: объекты, уже полученные в прошлых сессиях, не
-        запрашиваются повторно.
-        """
-        q = self._channel_queue(channel)
-
-        def _drain(deadline):
-            """Вычитывает JSON-тела из очереди до deadline, возвращает найденные."""
-            added = 0
-            while time.monotonic() < deadline:
-                try:
-                    d = q.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-                if len(d) < MIN_PKT:
-                    continue
-                p = d[HEADER_LEN:len(d) - MD5_LEN]
-                if not (p.startswith(b'{') or p.startswith(b'[')):
-                    continue
-                try:
-                    o = json.loads(p.decode("utf-8", "replace"))
-                except Exception:
-                    continue
-                if isinstance(o, dict) and o.get("objectid"):
-                    oid_s = _safe_str(o.get("objectid") or o.get("objectId"))
-                    if oid_s and oid_s not in seen:
-                        seen[oid_s] = o
-                        order.append(oid_s)
-                        added += 1
-            return added
-
-        def _missing():
-            return [(oid_int, rflag) for oid_s, (oid_int, rflag) in known_ids.items()
-                    if oid_s not in seen]
-
-        def _send_ids(items, idx_base):
-            for i, (oid_int, rflag) in enumerate(items):
-                try:
-                    pkt = self._build(CMD_GET, 0x00, channel,
-                                      get_list_payload(2, oid_int, rflag, idx_base + i + 1))
-                    with self._send_lock:
-                        self.sock.sendto(pkt, (self.host, self.port))
-                except Exception:  # pragma: no cover
-                    continue
-
-        initial_missing = _missing()
-        if not initial_missing:
-            return
-        for i in range(0, len(initial_missing), batch):
-            chunk = initial_missing[i:i + batch]
-            _send_ids(chunk, i)
-            time.sleep(0.05)
-            _drain(time.monotonic() + 0.6)
-            if declared_max and len(seen) >= declared_max:
-                return
-        # повторное дослат проспанных id (одиночная потеря): если за первую
-        # волну что-то не пришло — шлём ещё раз перед сменой сессии.
-        still = _missing()
-        if still and not (declared_max and len(seen) >= declared_max):
-            for i in range(0, len(still), batch):
-                chunk = still[i:i + batch]
-                _send_ids(chunk, i)
-                time.sleep(0.05)
-                _drain(time.monotonic() + 0.6)
-                if declared_max and len(seen) >= declared_max:
-                    return
 
     def open_camera(self, cam_id):
         """Открыть камеру: cmd=3 flag=0 на 0x30401, {"id":"...","name":"openCamera"}."""
         payload = json.dumps({"id": str(cam_id), "name": "openCamera"},
                              separators=(",", ":")).encode("utf-8")
         return self.send(CMD_EVENT, 0x00, 0x30401, payload, state_number=self._next_seq(),
-                         timeout=6.0)
+                         state_time=int(time.time() * 1000), timeout=6.0)
 
     def request_camera_settings(self, cam_id):
         """Открывает камеру и возвращает cameraSettings (порт/токен/SPS/PPS).
@@ -798,17 +672,26 @@ class AkvilonClient:
         (приходит на канал 0x2030401). Именно здесь сервер отдаёт реальные
         параметры RTP-потока: videoPort, videoHost, videoToken, spropParameter.
         """
+        if not self.sock:
+            self.connect()
         self.start_reader()
-        payload = json.dumps({"id": str(cam_id), "name": "openCamera"},
+        target = str(cam_id)
+
+        # Очищаем очередь и inbox от устаревших пакетов для этой камеры перед запросом
+        with self._inbox_lock:
+            self._inbox = [
+                d for d in self._inbox
+                if not (len(d) >= MIN_PKT and target.encode() in d)
+            ]
+
+        payload = json.dumps({"id": target, "name": "openCamera"},
                              separators=(",", ":")).encode("utf-8")
         self.sock.sendto(self._build(CMD_EVENT, 0x00, 0x30401, payload,
                                      state_number=self._next_seq(),
                                      state_time=int(time.time() * 1000)),
                          (self.host, self.port))
-        target = str(cam_id)
-        # Собираем ВСЕ входящие JSON-пакеты после запроса ищем объект с videoPort
-        # (канал может отличаться, поэтому сканируем общий inbox, а не одну очередь)
-        deadline = time.time() + 8.0
+
+        deadline = time.time() + 6.0
         while time.time() < deadline:
             pkts = list(self._queues.values())
             for q in pkts:
@@ -824,12 +707,16 @@ class AkvilonClient:
                         if not isinstance(obj, dict):
                             continue
                         if "videoPort" in obj or "spropParameter" in obj:
-                            return obj
+                            oid = str(obj.get("objectid") or obj.get("id") or "")
+                            if not oid or oid == target:
+                                return obj
                 except Exception:
                     pass
             if self._inbox:
                 with self._inbox_lock:
-                    for d in self._inbox:
+                    found_idx = -1
+                    found_obj = None
+                    for idx, d in enumerate(self._inbox):
                         if len(d) < MIN_PKT:
                             continue
                         pd = d[HEADER_LEN:len(d) - MD5_LEN]
@@ -837,11 +724,24 @@ class AkvilonClient:
                             try:
                                 obj = json.loads(pd.decode("utf-8", "replace"))
                                 if isinstance(obj, dict) and ("videoPort" in obj or "spropParameter" in obj):
-                                    return obj
+                                    oid = str(obj.get("objectid") or obj.get("id") or "")
+                                    if not oid or oid == target:
+                                        found_idx = idx
+                                        found_obj = obj
+                                        break
                             except Exception:
                                 pass
-            time.sleep(0.2)
+                    if found_idx >= 0:
+                        self._inbox.pop(found_idx)
+                        return found_obj
+            time.sleep(0.15)
         return None
+
+    def close_camera(self, cam_id="0:-1"):
+        payload = json.dumps({"id": str(cam_id), "name": "closeCamera"},
+                             separators=(",", ":")).encode("utf-8")
+        return self.send(CMD_EVENT, 0x00, 0x30401, payload, state_number=self._next_seq(),
+                         timeout=6.0)
 
     def send_video_token(self, vhost: str, vport: int, video_token: str):
         """Запускает RTP-поток камеры: шлёт подписочный пакет на видео-порт.
@@ -858,12 +758,6 @@ class AkvilonClient:
         except Exception as exc:  # pragma: no cover
             _LOG.debug("[akvilon_home] send_video_token err: %s", exc)
             return False
-
-    def close_camera(self, cam_id="0:-1"):
-        payload = json.dumps({"id": str(cam_id), "name": "closeCamera"},
-                             separators=(",", ":")).encode("utf-8")
-        return self.send(CMD_EVENT, 0x00, 0x30401, payload,
-                         state_number=self._next_seq(), timeout=6.0)
 
     def open_gate(self, gate_id) -> bool:
         """Открывает проход/калитку/домофон по реальному трафику приложения.

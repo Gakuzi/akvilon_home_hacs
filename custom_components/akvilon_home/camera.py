@@ -7,17 +7,12 @@ b"\x00\x00"+videoToken -> RTP/H.264 -> JPEG. Атрибуты берутся Т�
 _video_settings (без блокировки event loop).
 """
 import logging
-from urllib.parse import quote
 
 from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import (
-    DOMAIN,
-    camera_dev_id,
-)
-from .viewer import live_base_url
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,13 +39,6 @@ class AkvilonCamera(Camera):
         self.cam_id = cam_id
         self._name = name
         self._attr_unique_id = f"{DOMAIN}_cam_{cam_id.replace(':', '_')}"
-        # Привязка к устройству «Камера <имя>»
-        self._attr_device_info = {
-            "identifiers": {camera_dev_id(cam_id)},
-            "name": f"Камера {self._name}",
-            "manufacturer": "Аквилон InHome",
-            "model": "IP-камера ЖК Reka",
-        }
 
     @property
     def name(self):
@@ -70,6 +58,7 @@ class AkvilonCamera(Camera):
             "camera_name": self._name,
             "codec": "H.264",
             "integration": DOMAIN,
+            "is_favorite": bool(self._hub.is_favorite_camera(self.cam_id)),
             # привязка калитки/домофона (если это камера домофона)
             "domofon": False,
         }
@@ -90,25 +79,15 @@ class AkvilonCamera(Camera):
         return attrs
 
     async def stream_source(self):
-        """Источник непрерывного видео для HA stream.
-
-        Стандартного RTSP на здании нет — поток UDP/RTP с токеном. Когда запущена
-        веб-панель viewer (живое окно), отдаём её MJPEG-адрес поверх общей живой
-        RTP-сессии: HA stream/карточка получает непрерывное видео без обновления
-        по таймеру. Если viewer не запущен или go2rtc недоступен — возвращаем
-        None, и HA gracefully возвращается к покадровому async_camera_image.
-        """
-        base = live_base_url()
-        if not base:
-            return None
-        return f"{base}/mjpeg/{quote(self.cam_id, safe='')}"
+        # Стандартного RTSP-сервера на здании нет; поток — UDP/RTP с токеном.
+        return None
 
     async def async_camera_image(self, width=None, height=None):
-        """Возвращает реальный JPEG-кадр камеры (запуск RTP в executor)."""
+        """Возвращает реальный JPEG-кадр камеры (с умным кэшированием и fallback)."""
         hub = self._hub
         cam_id = self.cam_id
         return await self.hass.async_add_executor_job(
-            hub.camera_frame, cam_id, 7.0
+            hub.camera_frame, cam_id, 6.0, 3.5
         )
 
 

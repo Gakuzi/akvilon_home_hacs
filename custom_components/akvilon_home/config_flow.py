@@ -1,22 +1,26 @@
-"""Config flow для интеграции Аквилон InHome (максимально простой).
+"""Config flow для интеграции Аквилон InHome.
 
-Поток (всё на русском, минимум шагов):
-  1) «user» — вставка строки подключения (ключ/QR) и нажатие «Продолжить».
-  2) «check» — проверка соединения с сервером: показывает «Соединение с сервером
-     установлено» или «Не удалось соединиться». При успехе сразу грузит все
-     найденные устройства и создаёт конфигурацию.
+Пошаговый мастер настройки:
+  1) ввод строки подключения (QR) + название. Сразу после распознания ключа
+     выполняется проверка сервера: доступен ли он, вернул ли устройства.
+     Результат показывается прямо на первом шаге (понятная ошибка на русском),
+     затем идёт выбор ТИПОВ устройств (камеры/калитки/домофоны/счётчики),
+     выбор конкретных устройств и финальные опции (дашборд/Энергия/тарифы).
 
-Ошибки на русском:
-  - invalid_qr         -> не удалось распознать строку (неполный/неверный ключ);
-  - server_unreachable -> сервер здания недоступен (нет сети / сервер выключен);
-  - cannot_connect     -> ошибка при подключении/загрузке;
-  - no_devices         -> сервер доступен, но не вернул устройств.
+Обработка ошибок (показываются на первом шаге):
+  - invalid_qr        -> не удалось распознать строку;
+  - server_unreachable-> сервер здания недоступен;
+  - cannot_connect    -> ошибка при подключении/загрузке;
+  - no_devices        -> сервер доступен, но не вернул устройств.
+
+Документация: https://github.com/Gakuzi/akvilon_home_hacs/blob/main/README.md
 """
 import logging
 
 import voluptuous as vol
 
 from homeassistant import config_entries
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
@@ -27,20 +31,11 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_SERVER_ID,
     CONF_NAME,
-    CONF_GO2RTC_ENABLED,
-    CONF_GO2RTC_BASE_URL,
-    CONF_FRIGATE_ENABLED,
-    CONF_FRIGATE_BASE_URL,
-    CONF_FRIGATE_API_URL,
-    CONF_FRIGATE_LABELS,
+    CONF_FAVORITE_CAMERAS,
     DEFAULT_NAME,
-    DEFAULT_GO2RTC_BASE_URL,
-    DEFAULT_FRIGATE_BASE_URL,
-    DEFAULT_FRIGATE_API_URL,
-    DEFAULT_FRIGATE_LABELS,
+    CAMERAS,
 )
 from .protocol import parse_qr
-from .tariffs import TARIFF_FIELDS, parse_tariffs
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -50,6 +45,14 @@ QR_SCHEMA = vol.Schema(
         vol.Optional(CONF_NAME, default=DEFAULT_NAME): str,
     }
 )
+
+TYPE_META = {
+    "camera": ("Камеры", "mdi:cctv"),
+    "gate": ("Калитки", "mdi:gate"),
+    "intercom": ("Домофоны", "mdi:phone-in-talk"),
+    "meter": ("Счётчики", "mdi:counter"),
+}
+TYPE_ORDER = ["camera", "gate", "intercom", "meter"]
 
 
 class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
@@ -61,195 +64,254 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._params = {}
         self._devices = []
+        self._cur_selected = []
+        self._entry_title = None
 
-    @staticmethod
-    def async_get_options_flow(config_entry):
-        """Возвращает класс OptionsFlow для настройки go2rtc/Frigate."""
-        return AkvilonHomeOptionsFlow(config_entry)
-
-    # ------------------------------------------------------------------
-    # Шаг 1: ввод ключа
-    # ------------------------------------------------------------------
     async def async_step_user(self, user_input: dict | None = None) -> FlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             qr = (user_input.get("connection_string") or "").strip()
             if not qr:
-                return self._form_user("invalid_qr")
-            params = parse_qr(qr)
-            if not params.get("HOST") or not params.get("DEVICE_ID") or not params.get("PASS"):
-                _LOGGER.error("[akvilon_home][flow] Недостаточно полей: %s", params)
-                return self._form_user("invalid_qr")
-            self._params = {
-                CONF_HOST: params["HOST"],
-                CONF_PORT: int(params.get("PORT", 19090)),
-                CONF_TOKEN: params.get("SUID", ""),
-                CONF_DEVICE_ID: params["DEVICE_ID"],
-                CONF_SERVER_ID: params.get(
-                    "SERVER_ID",
-                    params.get("SERVERFLAG", "") + ":" + params.get("SERVERID_NUM", ""),
-                ),
-                CONF_NAME: user_input.get(CONF_NAME) or DEFAULT_NAME,
-                "_PASS": params.get("PASS", ""),
-                "connection_string": qr,
-            }
-            # Уникальный идентификатор по DEVICE_ID+HOST: при повторной настройке
-            # HA перенастроит существующий entry, а не создаст новый (иначе плодит
-            # дубли entity с суффиксами _2, _3...).
-            await self.async_set_unique_id(
-                f"{params['DEVICE_ID']}@{params['HOST']}"
-            )
-            self._abort_if_unique_id_configured()
-            # Ключ распознан — переходим к проверке соединения и загрузке
-            return await self.async_step_check()
+                errors["base"] = "invalid_qr"
+            else:
+                params = parse_qr(qr)
+                if not params.get("HOST") or not params.get("DEVICE_ID") or not params.get("PASS"):
+                    _LOGGER.error("[akvilon_home][flow] Недостаточно полей: %s", params)
+                    errors["base"] = "invalid_qr"
+                else:
+                    self._params = {
+                        CONF_HOST: params["HOST"],
+                        CONF_PORT: int(params.get("PORT", 19090)),
+                        CONF_TOKEN: params.get("SUID", ""),
+                        CONF_DEVICE_ID: params["DEVICE_ID"],
+                        CONF_SERVER_ID: params.get(
+                            "SERVER_ID", params.get("SERVERFLAG", "") + ":" + params.get("SERVERID_NUM", "")
+                        ),
+                        CONF_NAME: user_input.get(CONF_NAME) or DEFAULT_NAME,
+                        "_PASS": params.get("PASS", ""),
+                    }
+                    # Проверка сервера: пробуем загрузить устройства.
+                    # Сервер сейчас недоступен — методами подключения нельзя
+                    # отличить «нет сети» от «сервер не отвечает», поэтому
+                    # при исключении показываем понятное сообщение.
+                    devices = []
+                    try:
+                        devices = await self._load_devices()
+                    except Exception as exc:  # pragma: no cover
+                        _LOGGER.warning("[akvilon_home][flow] ошибка проверки сервера: %s", exc)
+                        devices = []
+                    if devices:
+                        self._devices = devices
+                        return await self.async_step_select_types()
+                    errors["base"] = "no_devices"
 
-        return self._form_user(None)
-
-    def _form_user(self, error: str | None) -> FlowResult:
         return self.async_show_form(
             step_id="user",
             data_schema=QR_SCHEMA,
-            errors={"base": error} if error else None,
+            errors=errors,
+            description_placeholders={
+                "note": (
+                    "Вставьте строку подключения от застройщика или QR-код. "
+                    "После распознания ключа выполняется проверка соединения."
+                )
+            },
         )
 
     # ------------------------------------------------------------------
-    # Шаг 2: проверка соединения с сервером + загрузка устройств
+    # Шаг 2: выбор типов устройств (с иконками)
     # ------------------------------------------------------------------
-    async def async_step_check(self, user_input: dict | None = None) -> FlowResult:
-        """Проверяет соединение с сервером. Успех -> сразу создаёт entry."""
-        # Быстрая проверка доступности сервера (UDP ping)
-        ping_ok = False
-        try:
-            ping_ok = await self.hass.async_add_executor_job(self._ping_server)
-        except Exception as exc:  # pragma: no cover
-            _LOGGER.warning("[akvilon_home][flow] ping error: %s", exc)
-
-        if not ping_ok:
-            return await self._abort_or_form("server_unreachable")
-
-        # Сервер доступен — грузим устройства
-        devices = []
-        try:
-            devices = await self.hass.async_add_executor_job(self._load_devices_list)
-        except Exception as exc:  # pragma: no cover
-            _LOGGER.warning("[akvilon_home][flow] load error: %s", exc)
-
-        if not devices:
-            return await self._abort_or_form("no_devices")
-
-        self._devices = devices
-        return await self.async_step_tariffs()
-
-    async def _abort_or_form(self, code: str) -> FlowResult:
-        # Показываем понятную ошибку на шаге проверки
-        return self.async_show_form(
-            step_id="check",
-            data_schema=vol.Schema({}),
-            errors={"base": code},
-        )
-
-    # ------------------------------------------------------------------
-    # Шаг 3: тарифы (Энергия) — Архангельск по умолчанию, можно изменить
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _add_media_defaults(data: dict) -> dict:
-        """Добавляет в entry.data опции go2rtc/WebRTC и Frigate по умолчанию.
-
-        Значения хранятся в entry.data (при создании) и могут быть изменены через
-        OptionsFlow (см. AkvilonHomeOptionsFlow). Все поля опциональны и не
-        влияют на загрузку, если функции выключены.
-        """
-        data.setdefault(CONF_GO2RTC_ENABLED, False)
-        data.setdefault(CONF_GO2RTC_BASE_URL, DEFAULT_GO2RTC_BASE_URL)
-        data.setdefault(CONF_FRIGATE_ENABLED, False)
-        data.setdefault(CONF_FRIGATE_BASE_URL, DEFAULT_FRIGATE_BASE_URL)
-        data.setdefault(CONF_FRIGATE_API_URL, DEFAULT_FRIGATE_API_URL)
-        data.setdefault(CONF_FRIGATE_LABELS, DEFAULT_FRIGATE_LABELS)
-        return data
-
-    async def async_step_tariffs(self, user_input: dict | None = None) -> FlowResult:
+    async def async_step_select_types(self, user_input: dict | None = None) -> FlowResult:
         errors: dict[str, str] = {}
-        has_meters = any(d.get("type") == "meter" for d in self._devices)
+        type_count: dict[str, int] = {}
+        for d in self._devices:
+            type_count[d["type"]] = type_count.get(d["type"], 0) + 1
+        default_types = [t for t in TYPE_ORDER if type_count.get(t, 0) > 0]
 
         if user_input is not None:
-            data = dict(self._params)
-            data["selected"] = [d["id"] for d in self._devices]
-            data["devices"] = self._devices
-            data["create_dashboard"] = True
-            data["add_to_energy"] = True
-            # Каноническая нормализация тарифов (missing/битые -> defaults региона).
-            data.update(parse_tariffs(user_input))
-            self._add_media_defaults(data)
-            title = self._params.get(CONF_NAME) or DEFAULT_NAME
-            return self.async_create_entry(title=title, data=data)
+            chosen = user_input.get("types") or []
+            chosen_set = set(chosen)
+            self._devices = [d for d in self._devices if d["type"] in chosen_set]
+            if self._devices:
+                return await self.async_step_select()
+            errors["base"] = "no_selection"
 
-        # Если счётчиков нет — просто создаём entry без шага тарифов.
-        if not has_meters:
-            data = dict(self._params)
-            data["selected"] = [d["id"] for d in self._devices]
-            data["devices"] = self._devices
-            data["create_dashboard"] = True
-            data["add_to_energy"] = True
-            data.update(parse_tariffs(None))
-            self._add_media_defaults(data)
-            title = self._params.get(CONF_NAME) or DEFAULT_NAME
-            return self.async_create_entry(title=title, data=data)
+        from homeassistant.helpers import selector
 
-        # Электроэнергия (день/ночь) — обязательные поля; вода — опциональна.
-        required_keys = {"electricity_tariff_day", "electricity_tariff_night"}
-        schema_fields = {
-            (
-                vol.Required(key, default=default)
-                if key in required_keys
-                else vol.Optional(key, default=default)
-            ): vol.Coerce(float)
-            for key, default in TARIFF_FIELDS
-        }
-        schema = vol.Schema(schema_fields)
-        note = (
-            "Тарифы квартиры (по умолчанию — Архангельск, без газа). "
-            "День/ночь электроэнергия, холодная и горячая вода. "
-            "Можно изменить — значения попадут в «Энергию»."
+        options = []
+        for t in TYPE_ORDER:
+            if type_count.get(t, 0) > 0:
+                group_name, icon = TYPE_META.get(t, (t, "mdi:view-grid"))
+                options.append(
+                    {"value": t, "label": f"{group_name} · {type_count[t]}", "icon": icon}
+                )
+        schema = vol.Schema(
+            {
+                vol.Optional("types", default=default_types): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=options, multiple=True, custom_value=False, mode="list"
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="select_types",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"total": str(len(self._devices))},
+        )
+
+    # ------------------------------------------------------------------
+    # Шаг 3: выбор конкретных устройств
+    # ------------------------------------------------------------------
+    async def async_step_select(self, user_input: dict | None = None) -> FlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            selected = user_input.get("devices") or []
+            if self._devices:
+                self._cur_selected = selected
+                data = dict(self._params)
+                data["selected"] = selected
+                self._entry_title = data.get(CONF_NAME) or DEFAULT_NAME
+                return await self.async_step_tariffs()
+            errors["base"] = "no_selection"
+
+        from homeassistant.helpers import selector
+
+        option_list = []
+        for dev in sorted(
+            self._devices,
+            key=lambda d: (TYPE_ORDER.index(d["type"]) if d["type"] in TYPE_ORDER else 9,
+                           dev_name(d).lower()),
+        ):
+            group_name, icon = TYPE_META.get(dev["type"], (dev["type"], "mdi:view-grid"))
+            option_list.append(
+                {"value": dev["id"], "label": dev_name(dev), "icon": icon, "group": group_name}
+            )
+        default_sel = [d["id"] for d in self._devices]
+        schema = vol.Schema(
+            {
+                vol.Optional("devices", default=default_sel): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=option_list, multiple=True, custom_value=False, mode="list"
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="select",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"count": str(len(self._devices))},
+        )
+
+    # ------------------------------------------------------------------
+    # Шаг 4: проверка и настройка тарифов ЖКУ (парсер Архангельск)
+    # ------------------------------------------------------------------
+    async def async_step_tariffs(self, user_input: dict | None = None) -> FlowResult:
+        errors: dict[str, str] = {}
+        from .tariffs import async_fetch_tariffs, DEFAULT_TARIFFS, GCAL_TO_GJ
+
+        if user_input is not None:
+            gcal = user_input.get("heating_tariff_gcal", DEFAULT_TARIFFS["heating_tariff_gcal"])
+            self._params.update({
+                "electricity_tariff_day": user_input.get("electricity_tariff_day", DEFAULT_TARIFFS["electricity_tariff_day"]),
+                "electricity_tariff_night": user_input.get("electricity_tariff_night", DEFAULT_TARIFFS["electricity_tariff_night"]),
+                "cold_water_tariff": user_input.get("cold_water_tariff", DEFAULT_TARIFFS["cold_water_tariff"]),
+                "hot_water_tariff": user_input.get("hot_water_tariff", DEFAULT_TARIFFS["hot_water_tariff"]),
+                "sewage_tariff": user_input.get("sewage_tariff", DEFAULT_TARIFFS["sewage_tariff"]),
+                "heating_tariff_gcal": gcal,
+                "heating_tariff_gj": round(float(gcal) / GCAL_TO_GJ, 2),
+            })
+            return await self.async_step_finish()
+
+        # Автоматический парсинг/загрузка тарифов онлайн
+        tariffs = await async_fetch_tariffs()
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    "electricity_tariff_day",
+                    default=tariffs.get("electricity_tariff_day", 8.67),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+                vol.Required(
+                    "electricity_tariff_night",
+                    default=tariffs.get("electricity_tariff_night", 3.91),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+                vol.Required(
+                    "cold_water_tariff",
+                    default=tariffs.get("cold_water_tariff", 59.60),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+                vol.Required(
+                    "hot_water_tariff",
+                    default=tariffs.get("hot_water_tariff", 210.00),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+                vol.Required(
+                    "sewage_tariff",
+                    default=tariffs.get("sewage_tariff", 48.24),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+                vol.Required(
+                    "heating_tariff_gcal",
+                    default=tariffs.get("heating_tariff_gcal", 2550.00),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+            }
         )
         return self.async_show_form(
             step_id="tariffs",
             data_schema=schema,
             errors=errors,
-            description_placeholders={"note": note},
+            description_placeholders={
+                "info": "Тарифы получены автоматически для ЖК «Река» (Архангельск). Вы можете скорректировать их при необходимости."
+            },
         )
 
     # ------------------------------------------------------------------
-    # Клиент / загрузка (executor — не блокирует event loop)
+    # Шаг 5: финальные опции (дашборд и раздел «Энергия»)
+    # ------------------------------------------------------------------
+    async def async_step_finish(self, user_input: dict | None = None) -> FlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            data = dict(self._params)
+            data["selected"] = self._cur_selected
+            data["create_dashboard"] = user_input.get("create_dashboard", True)
+            data["add_to_energy"] = user_input.get("add_to_energy", True)
+            title = self._entry_title or data.get(CONF_NAME) or DEFAULT_NAME
+            return self.async_create_entry(title=title, data=data)
+
+        schema = vol.Schema(
+            {
+                vol.Optional("create_dashboard", default=True): bool,
+                vol.Optional("add_to_energy", default=True): bool,
+            }
+        )
+        return self.async_show_form(
+            step_id="finish",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"note": "Создать автоматический дашборд «Аквилон» и связать счётчики с разделом «Энергия»?"},
+        )
+
+    # ------------------------------------------------------------------
+    # Загрузка списков устройств с сервера
     # ------------------------------------------------------------------
     def _build_client(self):
         from .protocol import AkvilonClient
 
-        _pass = self._params.get("_PASS", "")
         return AkvilonClient(
             self._params[CONF_HOST], self._params[CONF_PORT],
-            _pass,
+            self._params.get("_PASS", ""),
             device_id=self._params[CONF_DEVICE_ID],
             server_id=self._params[CONF_SERVER_ID],
-            pass_hex=_pass,  # подпись строится из pass_hex (иначе дефолт PASS_PLACEHOLDER)
         )
 
-    def _ping_server(self) -> bool:
-        cl = self._build_client()
-        try:
-            return cl.ping(timeout=4.0)
-        finally:
-            cl._running = False
-            cl.close()
-
-    def _load_devices_list(self):
+    def _load_devices_sync(self):
         from .protocol import CH_CAMERAS, CH_GATES, CH_METERS
 
         cl = self._build_client()
         cl.connect()
         cl.start_reader()
         try:
-            # НЕ вызываем subscribe()/register() для списков — register() портит
-            # UDP-сессию (сервер отвечает flag=0x82). Достаточно подписи PASS.
+            cl.subscribe()
+            cl.register()
             import time
 
             time.sleep(0.5)
@@ -259,31 +321,27 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         finally:
             cl._running = False
             cl.close()
+        return cams, gates, mets
 
+    async def _load_devices(self):
+        cams, gates, mets = await self.hass.async_add_executor_job(self._load_devices_sync)
         devices = []
         for c in cams:
             oid = str(c.get("objectid") or c.get("objectId") or "")
             if oid:
-                devices.append({"id": oid, "name": self._clean(c, "Камера", oid), "type": "camera"})
+                devices.append({"id": oid, "name": clean_name(c, "Камера", oid), "type": "camera"})
         for g in gates:
             oid = str(g.get("objectid") or g.get("objectId") or "")
             if oid:
                 cam = str(g.get("cameraId") or "")
                 kind = "intercom" if cam and cam != "0:-1" else "gate"
                 label = "Домофон" if kind == "intercom" else "Калитка"
-                devices.append({"id": oid, "name": self._clean(g, label, oid), "type": kind})
+                devices.append({"id": oid, "name": clean_name(g, label, oid), "type": kind})
         for m in mets:
             oid = str(m.get("objectid") or m.get("objectId") or "")
             if oid:
-                devices.append({"id": oid, "name": self._clean(m, "Счётчик", oid), "type": "meter"})
-
-        _LOGGER.info("[akvilon_home][flow] Загружено устройств: %d", len(devices))
+                devices.append({"id": oid, "name": clean_name(m, "Счётчик", oid), "type": "meter"})
         return devices
-
-    @staticmethod
-    def _clean(obj: dict, fallback: str, oid: str) -> str:
-        raw = str(obj.get("name") or obj.get("Name") or "").strip()
-        return " ".join(raw.split()) if raw else f"{fallback} {oid}"
 
     async def async_step_reconfigure(self, user_input: dict | None = None) -> FlowResult:
         entry = self._get_reconfigure_entry()
@@ -298,73 +356,90 @@ class AkvilonHomeFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_user(user_input)
         return self.async_show_form(step_id="reconfigure", data_schema=schema)
 
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> config_entries.OptionsFlow:
+        """Получить обработчик опций интеграции."""
+        return AkvilonOptionsFlowHandler(config_entry)
 
-class AkvilonHomeOptionsFlow(config_entries.OptionsFlow):
-    """OptionsFlow: включение/настройка go2rtc/WebRTC и Frigate-детекции.
 
-    Доступен из «Система -> Устройства и службы -> Аквилон InHome -> Параметры».
-    Шаг ``init`` показывает вкл/выкл и базовые URL; изменения сохраняются в
-    entry.options и не ломают загрузку, если функции выключены.
-    """
+class AkvilonOptionsFlowHandler(config_entries.OptionsFlow):
+    """Настройка параметров и опций интеграции Аквилон InHome."""
 
-    def __init__(self, config_entry):
-        self._entry = config_entry
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        self.config_entry = config_entry
 
     async def async_step_init(self, user_input: dict | None = None) -> FlowResult:
-        data = self._entry.data or {}
+        """Основной шаг управления опциями (избранные камеры, тарифы)."""
         if user_input is not None:
-            # Сохраняем только go2rtc/Frigate-поля (остальные data не трогаем);
-            # unsupported-key-ошибок не будет, т.к. опции пишем в options.
-            options = {
-                CONF_GO2RTC_ENABLED: bool(user_input.get(CONF_GO2RTC_ENABLED, False)),
-                CONF_GO2RTC_BASE_URL: user_input.get(
-                    CONF_GO2RTC_BASE_URL, DEFAULT_GO2RTC_BASE_URL
-                ),
-                CONF_FRIGATE_ENABLED: bool(user_input.get(CONF_FRIGATE_ENABLED, False)),
-                CONF_FRIGATE_BASE_URL: user_input.get(
-                    CONF_FRIGATE_BASE_URL, DEFAULT_FRIGATE_BASE_URL
-                ),
-                CONF_FRIGATE_API_URL: user_input.get(
-                    CONF_FRIGATE_API_URL, DEFAULT_FRIGATE_API_URL
-                ),
-                CONF_FRIGATE_LABELS: user_input.get(
-                    CONF_FRIGATE_LABELS, DEFAULT_FRIGATE_LABELS
-                ),
-            }
-            return self.async_create_entry(title="", data=options)
+            return self.async_create_entry(title="", data=user_input)
 
-        # Текущие значения: предпочтение options, фолбэк data.
-        cur = {**data, **dict(self._entry.options or {})}
-        schema = vol.Schema(
-            {
-                vol.Optional(
-                    CONF_GO2RTC_ENABLED, default=bool(cur.get(CONF_GO2RTC_ENABLED, False))
-                ): bool,
-                vol.Optional(
-                    CONF_GO2RTC_BASE_URL, default=cur.get(CONF_GO2RTC_BASE_URL, DEFAULT_GO2RTC_BASE_URL)
-                ): str,
-                vol.Optional(
-                    CONF_FRIGATE_ENABLED, default=bool(cur.get(CONF_FRIGATE_ENABLED, False))
-                ): bool,
-                vol.Optional(
-                    CONF_FRIGATE_BASE_URL, default=cur.get(CONF_FRIGATE_BASE_URL, DEFAULT_FRIGATE_BASE_URL)
-                ): str,
-                vol.Optional(
-                    CONF_FRIGATE_API_URL, default=cur.get(CONF_FRIGATE_API_URL, DEFAULT_FRIGATE_API_URL)
-                ): str,
-                vol.Optional(
-                    CONF_FRIGATE_LABELS, default=cur.get(CONF_FRIGATE_LABELS, DEFAULT_FRIGATE_LABELS)
-                ): str,
-            }
-        )
+        hub = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+        current_favs = list(self.config_entry.options.get(CONF_FAVORITE_CAMERAS, self.config_entry.data.get(CONF_FAVORITE_CAMERAS, [])))
+
+        # Формируем список всех доступных камер для выбора
+        camera_options = []
+        if hub and hub.cameras:
+            for c in hub.cameras:
+                cid = str(c.get("objectid") or c.get("objectId") or "")
+                cname = clean_name(c, "Камера", cid)
+                if cid:
+                    camera_options.append({"value": cid, "label": cname})
+        else:
+            for cid, cname, _ in CAMERAS:
+                camera_options.append({"value": cid, "label": cname})
+
+        from homeassistant.helpers import selector
+
+        schema = vol.Schema({
+            vol.Optional(CONF_FAVORITE_CAMERAS, default=current_favs): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=camera_options,
+                    multiple=True,
+                    custom_value=False,
+                    mode="list",
+                )
+            ),
+            vol.Optional(
+                "electricity_tariff_day",
+                default=float(self.config_entry.options.get("electricity_tariff_day", self.config_entry.data.get("electricity_tariff_day", 8.67))),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+            vol.Optional(
+                "electricity_tariff_night",
+                default=float(self.config_entry.options.get("electricity_tariff_night", self.config_entry.data.get("electricity_tariff_night", 3.91))),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+            vol.Optional(
+                "cold_water_tariff",
+                default=float(self.config_entry.options.get("cold_water_tariff", self.config_entry.data.get("cold_water_tariff", 59.60))),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+            vol.Optional(
+                "hot_water_tariff",
+                default=float(self.config_entry.options.get("hot_water_tariff", self.config_entry.data.get("hot_water_tariff", 210.00))),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+            vol.Optional(
+                "sewage_tariff",
+                default=float(self.config_entry.options.get("sewage_tariff", self.config_entry.data.get("sewage_tariff", 48.24))),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+            vol.Optional(
+                "heating_tariff_gcal",
+                default=float(self.config_entry.options.get("heating_tariff_gcal", self.config_entry.data.get("heating_tariff_gcal", 2550.00))),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+        })
+
         return self.async_show_form(
             step_id="init",
             data_schema=schema,
-            description_placeholders={
-                "note": (
-                    "Связка go2rtc + WebRTC + Frigate для живого видео и детекции "
-                    "человека у домофона. Обе функции опциональны: выключенные не "
-                    "влияют на загрузку HA. Подробнее — docs/ADR/ADR-003."
-                )
-            },
+            description_placeholders={"fav_count": str(len(current_favs))},
         )
+
+
+def clean_name(obj: dict, fallback_label: str, oid: str) -> str:
+    """Возвращает чистое читаемое название устройства с сервера."""
+    raw = str(obj.get("name") or obj.get("Name") or "").strip()
+    raw = " ".join(raw.split())
+    return raw if raw else f"{fallback_label} {oid}"
+
+
+def dev_name(dev: dict) -> str:
+    """Имя устройства для отображения в списке выбора."""
+    return dev.get("name") or dev["id"]
