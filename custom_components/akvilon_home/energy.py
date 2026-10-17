@@ -35,16 +35,20 @@ async def async_configure_energy_dashboard(hass: HomeAssistant, entry: ConfigEnt
 
     sources = list(manager.data.get("energy_sources", [])) if manager.data else []
 
-    # Удаляем устаревшие записи со сломанными id вида sensor.akvilon_home_meter_*
+    # Удаляем устаревшие и дублирующие записи (суммарный счётчик, старые префиксы, flow_from)
     valid_sources = []
     for s in sources:
-        stat_from = s.get("stat_energy_from", "")
-        if stat_from.startswith("sensor.akvilon_home_meter_"):
+        stat_from = s.get("stat_energy_from") or ""
+        if stat_from.startswith("sensor.akvilon_home_meter_") or "pribory_ucheta" in stat_from:
+            continue
+        if stat_from.endswith("_elektrichestvo") or s.get("flow_from"):
+            continue
+        if s.get("type") == "gas" and not any(stat_from.endswith(sfx) for sfx in ("_gj", "_gdz", "_gdzh")):
             continue
         valid_sources.append(s)
     sources = valid_sources
 
-    # 1. Электроэнергия: T1 (День) и T2 (Ночь)
+    # 1. Электроэнергия: раздельные тарифы T1 (День) и T2 (Ночь)
     for m in hub.meters:
         dn = str(m.get("deviceNumber") or m.get("device_number") or "")
         rtype = str(m.get("resourceType") or "")
@@ -111,7 +115,7 @@ async def async_configure_energy_dashboard(hass: HomeAssistant, entry: ConfigEnt
         rtype = str(m.get("resourceType") or "")
         name = str(m.get("name") or "").lower()
         if rtype == "4" or "отопление" in name:
-            uniq = f"{DOMAIN}_meter_{dn}"
+            uniq = f"{DOMAIN}_meter_{dn}_gj"
             stat_id = _resolve(uniq)
             if not stat_id:
                 continue

@@ -10,3 +10,73 @@ open_gate:
       example: "1:101908"
       selector:
         text:
+
+intercom_answer:
+  name: Домофон ответить
+  description: Ответить на входящий вызов домофона (подключиться, открыть видео с камеры домофона). Если camera_id не указан — берётся из активного вызова.
+  fields:
+    camera_id:
+      name: ID камеры
+      description: Идентификатор камеры домофона (например "3:101885")
+      required: false
+      example: "3:101885"
+      selector:
+        text:
+    gate_id:
+      name: ID калитки
+      description: Идентификатор калитки/домофона (опционально)
+      required: false
+      example: "1:101908"
+      selector:
+        text:
+
+intercom_accept_audio:
+  name: Домофон принять звук
+  description: Включить разговорный (голосовой) канал микрофон/динамик с камерой домофона. Требует voicePort/voiceHost в cameraSettings.
+  fields:
+    camera_id:
+      name: ID камеры
+      description: Идентификатор камеры домофона
+      required: false
+      example: "3:101885"
+      selector:
+        text:
+
+intercom_unlock:
+  name: Домофон открыть дверь
+  description: Просто открыть дверь/калитку домофона (без ответа на вызов)
+  fields:
+    gate_id:
+      name: ID калитки
+      description: Идентификатор калитки/домофона. Если не указан — берётся калитка, связанная с активным вызовом.
+      required: false
+      example: "1:101908"
+      selector:
+        text:
+
+voice_mic:
+  name: Голосовой канал — микрофон
+  description: Включить/выключить микрофон активного голосового канала домофона и задать громкость (аналог setMicIsOn/setMicVolume в приложении)
+  fields:
+    mic_on:
+      name: Микрофон включён
+      description: true — включить передачу с микрофона, false — выключить
+      required: false
+      default: true
+      selector:
+        boolean:
+    volume:
+      name: Громкость микрофона
+      description: Уровень громкости микрофона (0.0 — 1.0)
+      required: false
+      example: 0.8
+      selector:
+        number:
+          min: 0
+          max: 1
+          step: 0.05
+
+voice_stop:
+  name: Голосовой канал — завершить
+  description: Закрыть активный голосовой канал домофона (положить трубку)
+  fields: {}

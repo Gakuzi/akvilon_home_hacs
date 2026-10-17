@@ -1,4 +1,6 @@
 """Сенсоры состояния калиток и приборов учёта Аквилон (из живых данных сервера)."""
+from __future__ import annotations
+
 import logging
 from time import monotonic
 
@@ -71,42 +73,24 @@ class AkvilonMeterSensor(SensorEntity):
         val = _meter_value(self.meter)
         if val is None:
             return None
-        # Отопление: переводим Гкал в GJ (ГДж) для нативной поддержки в панели «Энергия» HA (1 Гкал = 4.1868 ГДж)
-        t = str(self.meter.get("resourceType", ""))
-        cur = _meter_current(self.meter) or {}
-        raw_unit = str(cur.get("unit") or "").lower()
-        if t in ("4",) or "гкал" in raw_unit:
-            try:
-                return round(float(val) * 4.1868, 4)
-            except (ValueError, TypeError):
-                return val
         return val
 
     @property
     def native_unit_of_measurement(self):
-        t = str(self.meter.get("resourceType", ""))
         cur = _meter_current(self.meter)
         if isinstance(cur, dict):
             raw_unit = (cur.get("unit") or "").strip()
-            if t in ("4",) or "гкал" in raw_unit.lower():
-                return "GJ"
             return _normalize_unit(raw_unit)
         return None
 
     @property
     def suggested_unit_of_measurement(self):
-        t = str(self.meter.get("resourceType", ""))
-        cur = _meter_current(self.meter)
-        if isinstance(cur, dict):
-            raw_unit = (cur.get("unit") or "").strip()
-            if t in ("4",) or "гкал" in raw_unit.lower():
-                return "GJ"
-        return None
+        return self.native_unit_of_measurement
 
     @property
     def device_class(self):
         t = str(self.meter.get("resourceType", ""))
-        if t in ("1", "4"):  # electricity & heating (energy)
+        if t in ("1",):  # electricity
             return "energy"
         if t in ("2", "3"):  # water
             return "water"
@@ -192,6 +176,66 @@ class AkvilonMeterTariffSensor(SensorEntity):
         }
 
 
+class AkvilonMeterHeatingEnergySensor(SensorEntity):
+    """Сенсор отопления в ГДж (GJ) специально для раздела «Энергия» Home Assistant.
+
+    Home Assistant Energy в разделе «Газ» поддерживает только GJ, kWh, MWh, m³.
+    Этот сенсор пересчитывает Гкал в ГДж (1 Гкал = 4.1868 ГДж) для Energy Dashboard,
+    в то время как основной сенсор отображает нативные Гкал для пользователя.
+    """
+
+    _attr_has_entity_name = False
+    _attr_device_class = "energy"
+    _attr_state_class = "total_increasing"
+    _attr_native_unit_of_measurement = "GJ"
+    _attr_icon = "mdi:radiator"
+
+    def __init__(self, meter: dict):
+        self.meter = meter
+        dn = _or_val(meter.get("deviceNumber") or meter.get("device_number"))
+        name = meter.get("name") or "Счётчик Отопление"
+        self._attr_unique_id = f"{DOMAIN}_meter_{dn}_gj"
+        self._label = f"{name} (ГДж)"
+        self._device_number = dn
+        self._attr_suggested_object_id = "schetchik_kvartira_31_otoplenie_gj"
+
+    @property
+    def name(self):
+        return f"Счётчик {self._label}"
+
+    @property
+    def native_value(self):
+        val = _meter_value(self.meter)
+        if val is None:
+            return None
+        try:
+            return round(float(val) * 4.1868, 4)
+        except (ValueError, TypeError):
+            return None
+
+    @property
+    def native_unit_of_measurement(self):
+        return "GJ"
+
+    @property
+    def device_class(self):
+        return "energy"
+
+    @property
+    def state_class(self):
+        return "total_increasing"
+
+    @property
+    def extra_state_attributes(self):
+        cur = _meter_current(self.meter) or {}
+        return {
+            "integration": DOMAIN,
+            "device_number": self._device_number,
+            "raw_value_gcal": cur.get("value"),
+            "conversion": "1 Gcal = 4.1868 GJ",
+        }
+
+
 class AkvilonTariffPriceSensor(SensorEntity):
     """Сенсор стоимости тарифа ЖКУ (для автоматического расчета затрат в разделе «Энергия»)."""
 
@@ -204,6 +248,10 @@ class AkvilonTariffPriceSensor(SensorEntity):
         self._unit = unit
         self._val = val
         self._attr_unique_id = f"{DOMAIN}_tariff_{key}"
+        if key == "heating_tariff_gj":
+            self._attr_suggested_object_id = "tarif_otoplenie_gj"
+        elif key == "heating_tariff_gcal":
+            self._attr_suggested_object_id = "tarif_otoplenie"
 
     @property
     def name(self):
@@ -448,10 +496,11 @@ class AkvilonUtilityTotalCostSensor(SensorEntity):
                 res["cold_water"] = round(v * (rate + sewage), 2)
             elif rtype == "3" or "гвс" in name:
                 rate = float(self._tariffs.get("hot_water_tariff", 210.00))
-                res["hot_water"] = round(v * rate, 2)
+                sewage = float(self._tariffs.get("sewage_tariff", 48.24))
+                res["hot_water"] = round(v * (rate + sewage), 2)
             elif rtype == "4" or "отопление" in name:
-                rate = float(self._tariffs.get("heating_tariff_gj", 609.05))
-                res["heating"] = round(v * 4.1868 * rate, 2)
+                rate = float(self._tariffs.get("heating_tariff_gcal", 2550.00))
+                res["heating"] = round(v * rate, 2)
         return res
 
     @property
@@ -479,6 +528,10 @@ async def async_setup_entry(
         if isinstance(vals, list) and len(vals) >= 2:
             sens.append(AkvilonMeterTariffSensor(m, 0, "День"))
             sens.append(AkvilonMeterTariffSensor(m, 1, "Ночь"))
+        rtype = str(m.get("resourceType") or "")
+        name = str(m.get("name") or "").lower()
+        if rtype == "4" or "отопление" in name:
+            sens.append(AkvilonMeterHeatingEnergySensor(m))
     for g in hub.gates:
         gid = str(g.get("objectid") or g.get("objectId") or "")
         if gid:
@@ -488,7 +541,7 @@ async def async_setup_entry(
         if iid:
             sens.append(AkvilonIntercomSensor(hub, iid, ic.get("name") or "Домофон"))
 
-    # Тарифные сенсоры стоимости ЖКУ (для автоматического расчета затрат в разделе «Энергия»)
+    # Тарифные сенсоры стоимости ЖКУ (г. Архангельск, все валюты в рублях)
     from .tariffs import DEFAULT_TARIFFS
     tariff_defs = [
         ("electricity_tariff_day", "Электроэнергия (День)", "RUB/kWh"),
@@ -496,7 +549,8 @@ async def async_setup_entry(
         ("cold_water_tariff", "Холодная вода (ХВС)", "RUB/m³"),
         ("hot_water_tariff", "Горячая вода (ГВС)", "RUB/m³"),
         ("sewage_tariff", "Водоотведение", "RUB/m³"),
-        ("heating_tariff_gj", "Отопление", "RUB/GJ"),
+        ("heating_tariff_gcal", "Отопление", "RUB/Гкал"),
+        ("heating_tariff_gj", "Отопление (ГДж)", "RUB/GJ"),
     ]
     cur_tariffs = {}
     for key, label, unit in tariff_defs:

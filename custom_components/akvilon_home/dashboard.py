@@ -14,6 +14,8 @@
   6. Диагностика (diagnostics): мониторинг соединения, пинг, ошибки, сокеты, кнопка синхронизации.
   7. Киоск (kiosk): компактный режим для настенного планшета или ТВ.
 """
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -180,9 +182,22 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
     gate_state = r.find("sensor.kalitka")
     dom_sensors = r.find("sensor.domofon")
 
-    # 5. Счётчики и тарифы
-    meter_entities = r.find("sensor.schetchik")
-    tariff_entities = r.find("sensor.tarif")
+    # 5. Счётчики и тарифы (фильтруем служебные _cost, технический _gj и дубли общего электричества)
+    all_meters = r.find("sensor.schetchik")
+    has_day_night = any("_den" in m or "_noch" in m or "_t1" in m for m in all_meters)
+    meter_entities = [
+        m for m in all_meters
+        if not m.endswith("_cost")
+        and not any(m.endswith(sfx) for sfx in ("_gj", "_gdz", "_gdzh"))
+        and not (has_day_night and m.endswith("_elektrichestvo"))
+    ]
+
+    all_tariffs = r.find("sensor.tarif")
+    # Для пользователя на дашборде скрываем технический тариф ГДж, оставляем понятный тариф в Гкал
+    tariff_entities = [
+        t for t in all_tariffs
+        if not any(t.endswith(sfx) for sfx in ("_gj", "_gdz", "_gdzh"))
+    ]
 
     def intercom_card(title: str, btn: str, cam: str = "", status: str = "", intercom_call: str = ""):
         return {
@@ -313,7 +328,7 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
             "type": "custom:akvilon-camera-card",
             "entity": c,
             "name": r.get_friendly_name(c),
-            "lazy": False,
+            "lazy": True,
             "refresh_interval": 15,
         }
         for c in fav_cams
@@ -371,12 +386,12 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
             "name": r.get_friendly_name(m).replace("Счётчик Квартира 31 ", ""),
             "icon": "mdi:counter",
         }
-        for m in meter_entities[:4]
+        for m in meter_entities
     ]
     if meter_tiles:
         overview_cards.append({
             "type": "grid",
-            "columns": 4,
+            "columns": 5,
             "square": False,
             "cards": meter_tiles,
         })
