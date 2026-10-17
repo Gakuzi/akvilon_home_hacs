@@ -177,15 +177,15 @@ class AkvilonMeterTariffSensor(SensorEntity):
 
 
 class AkvilonMeterHeatingEnergySensor(SensorEntity):
-    """Сенсор отопления в ГДж (GJ) специально для раздела «Энергия» Home Assistant.
+    """Сенсор отопления/теплоснабжения в ГДж (GJ) для раздела «Энергия» Home Assistant.
 
-    Home Assistant Energy в разделе «Газ» поддерживает только GJ, kWh, MWh, m³.
+    Home Assistant Energy в разделе «Газ» поддерживает GJ, kWh, MWh, m³ при device_class: gas.
     Этот сенсор пересчитывает Гкал в ГДж (1 Гкал = 4.1868 ГДж) для Energy Dashboard,
-    в то время как основной сенсор отображает нативные Гкал для пользователя.
+    выступая источником в категории Газ/Теплоснабжение с тарифом теплоснабжения (RUB/GJ).
     """
 
     _attr_has_entity_name = False
-    _attr_device_class = "energy"
+    _attr_device_class = "gas"
     _attr_state_class = "total_increasing"
     _attr_native_unit_of_measurement = "GJ"
     _attr_icon = "mdi:radiator"
@@ -193,11 +193,11 @@ class AkvilonMeterHeatingEnergySensor(SensorEntity):
     def __init__(self, meter: dict):
         self.meter = meter
         dn = _or_val(meter.get("deviceNumber") or meter.get("device_number"))
-        name = meter.get("name") or "Счётчик Отопление"
+        name = meter.get("name") or "Счётчик Теплоснабжение"
         self._attr_unique_id = f"{DOMAIN}_meter_{dn}_gj"
-        self._label = f"{name} (ГДж)"
+        self._label = f"Теплоснабжение (ГДж)"
         self._device_number = dn
-        self._attr_suggested_object_id = "schetchik_kvartira_31_otoplenie_gj"
+        self._attr_suggested_object_id = "schetchik_kvartira_31_otoplenie_gdzh"
 
     @property
     def name(self):
@@ -219,7 +219,7 @@ class AkvilonMeterHeatingEnergySensor(SensorEntity):
 
     @property
     def device_class(self):
-        return "energy"
+        return "gas"
 
     @property
     def state_class(self):
@@ -249,7 +249,7 @@ class AkvilonTariffPriceSensor(SensorEntity):
         self._val = val
         self._attr_unique_id = f"{DOMAIN}_tariff_{key}"
         if key == "heating_tariff_gj":
-            self._attr_suggested_object_id = "tarif_otoplenie_gj"
+            self._attr_suggested_object_id = "tarif_otoplenie_gdzh"
         elif key == "heating_tariff_gcal":
             self._attr_suggested_object_id = "tarif_otoplenie"
 

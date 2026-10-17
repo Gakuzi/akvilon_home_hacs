@@ -130,7 +130,11 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
     )
     latency_entity = r.resolve("sensor.akvilon_zaderzhka_servera")
     status_entity = r.resolve("sensor.akvilon_sostoianie_sistemy")
-    total_cost_entity = r.resolve("sensor.akvilon_stoimost_zhku_za_mesiatc")
+    tc_sensors = r.find("sensor.akvilon_stoimost_zhku")
+    total_cost_entity = tc_sensors[0] if tc_sensors else (
+        r.resolve("sensor.akvilon_stoimost_zhku_za_mesiats")
+        or r.resolve("sensor.akvilon_stoimost_zhku_za_mesiatc")
+    )
 
     # 2. Вызовы домофона
     call_sensors = r.find("binary_sensor.akvilon_home_intercom_call")
@@ -684,6 +688,30 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
             "square": False,
             "cards": readings,
         })
+
+    # Аналитика затрат и учет энергоресурсов (Energy Dashboard)
+    meter_cards.append({
+        "type": "heading",
+        "heading": "Аналитика затрат и начислений ЖКУ",
+        "heading_style": "subtitle",
+    })
+    meter_cards.append({
+        "type": "energy-date-selection",
+    })
+    meter_cards.append({
+        "type": "energy-sources-table",
+    })
+    meter_cards.append({
+        "type": "energy-cost-graph",
+    })
+    meter_cards.append({
+        "type": "energy-gas-graph",
+        "title": "🔥 Теплоснабжение (Отопление)",
+    })
+    meter_cards.append({
+        "type": "energy-water-graph",
+        "title": "💧 Водоснабжение (ХВС / ГВС)",
+    })
 
     # Кнопка перехода в панель Энергия
     meter_cards.append({
