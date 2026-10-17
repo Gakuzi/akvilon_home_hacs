@@ -338,7 +338,11 @@ class AkvilonServerLatencySensor(SensorEntity):
 
     @property
     def native_value(self):
-        return self._hub.ping_server()
+        return self._hub.ping_ms if self._hub.ping_ms is not None else 0.0
+
+    async def async_update(self):
+        """Неблокирующий замер задержки через пул потоков."""
+        await self.hass.async_add_executor_job(self._hub.ping_server)
 
     @property
     def extra_state_attributes(self):

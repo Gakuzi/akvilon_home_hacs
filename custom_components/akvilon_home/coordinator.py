@@ -347,7 +347,7 @@ class AkvilonHub:
         t0 = time.monotonic()
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(2.0)
+            sock.settimeout(0.8)
             sock.sendto(b"\x00" * 4, (self.host, int(self.port)))
             dt = (time.monotonic() - t0) * 1000.0
             self.ping_ms = round(dt, 1)
