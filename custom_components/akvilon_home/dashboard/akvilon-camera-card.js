@@ -70,6 +70,7 @@ class AkvilonCameraCard extends HTMLElement {
       lazy: true,
       refresh_interval: 20,
       aspect_ratio: "16/9",
+      stagger_delay: 0,
       ...config,
     };
     this._renderBase();
@@ -139,10 +140,25 @@ class AkvilonCameraCard extends HTMLElement {
 
   _setupObserver() {
     if (this._observer) return;
+    const stagger = Number(this._config.stagger_delay) || 0;
+
+    const doInitLoad = () => {
+      if (stagger > 0 && !this._loadedOnce) {
+        setTimeout(() => {
+          if (this._isVisible && !this._isPausedForLive) {
+            this._updateImage();
+            this._startTimer();
+          }
+        }, stagger);
+      } else {
+        this._updateImage();
+        this._startTimer();
+      }
+    };
+
     if (!this._config || this._config.lazy === false) {
       this._isVisible = true;
-      this._startTimer();
-      this._updateImage();
+      doInitLoad();
       return;
     }
 
@@ -153,8 +169,7 @@ class AkvilonCameraCard extends HTMLElement {
             if (entry.isIntersecting) {
               this._isVisible = true;
               if (!this._isPausedForLive) {
-                this._updateImage();
-                this._startTimer();
+                doInitLoad();
               }
             } else {
               this._isVisible = false;
@@ -170,8 +185,7 @@ class AkvilonCameraCard extends HTMLElement {
       this._observer.observe(this);
     } else {
       this._isVisible = true;
-      this._startTimer();
-      this._updateImage();
+      doInitLoad();
     }
   }
 
@@ -644,10 +658,15 @@ class AkvilonCameraCard extends HTMLElement {
         .aspect-box {
           position: relative;
           width: 100%;
-          min-height: 240px;
+          min-height: 280px;
           aspect-ratio: ${this._config.aspect_ratio || "16/9"};
           background: #09090b;
           overflow: hidden;
+        }
+        @media (max-width: 600px) {
+          .aspect-box {
+            min-height: 200px;
+          }
         }
         .camera-feed {
           position: absolute;
@@ -866,12 +885,566 @@ class AkvilonCameraCard extends HTMLElement {
 
 customElements.define("akvilon-camera-card", AkvilonCameraCard);
 
+/**
+ * AkvilonCameraHub — хаб видеонаблюдения с боковым меню разделов,
+ * отображением ровно 4-6 крупных камер на страницу, ступенчатой плавной
+ * подгрузкой (staggered delay) и пагинацией.
+ */
+class AkvilonCameraHub extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+    this._hass = null;
+    this._config = null;
+    this._activeCatId = "fav";
+    this._currentPage = 0;
+    this._pageSize = 6;
+    this._renderedCards = [];
+    this._categories = [];
+
+    this._onFavoriteToggled = () => {
+      this._updateFavoriteBadges();
+      if (this._activeCatId === "fav") {
+        this._renderCurrentPage();
+      }
+    };
+  }
+
+  static getStubConfig() {
+    return {
+      title: "Видеонаблюдение ЖК «Река»",
+      page_size: 6,
+    };
+  }
+
+  setConfig(config) {
+    this._config = {
+      title: "Видеонаблюдение ЖК «Река»",
+      page_size: 6,
+      categories: [],
+      ...config,
+    };
+    this._pageSize = Number(this._config.page_size) || 6;
+    this._categories = Array.isArray(this._config.categories) ? [...this._config.categories] : [];
+
+    const saved = localStorage.getItem("akvilon_camera_hub_cat");
+    const validIds = this._categories.map((c) => c.id);
+    if (saved && (validIds.includes(saved) || saved === "fav" || saved === "all")) {
+      this._activeCatId = saved;
+    } else if (this._categories.length > 0) {
+      this._activeCatId = this._categories[0].id;
+    } else {
+      this._activeCatId = "fav";
+    }
+
+    this._renderBase();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (!this._config) return;
+
+    for (const card of this._renderedCards) {
+      if (card) card.hass = hass;
+    }
+
+    this._updateFavoriteBadges();
+
+    const grid = this.shadowRoot.querySelector(".hub-grid");
+    if (grid && grid.children.length === 0) {
+      this._renderCurrentPage();
+    }
+  }
+
+  connectedCallback() {
+    window.addEventListener("akvilon-favorite-toggled", this._onFavoriteToggled);
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener("akvilon-favorite-toggled", this._onFavoriteToggled);
+    this._clearRenderedCards();
+  }
+
+  _clearRenderedCards() {
+    const grid = this.shadowRoot ? this.shadowRoot.querySelector(".hub-grid") : null;
+    if (grid) {
+      grid.innerHTML = "";
+    }
+    this._renderedCards = [];
+  }
+
+  _getCamerasForCategory(catId) {
+    if (!this._hass) return [];
+
+    if (catId === "fav") {
+      const favs = [];
+      for (const [eid, state] of Object.entries(this._hass.states)) {
+        if (eid.startsWith("camera.") && state.attributes?.is_favorite) {
+          favs.push({
+            entity: eid,
+            name: state.attributes.friendly_name || eid,
+          });
+        }
+      }
+      return favs;
+    }
+
+    const cat = this._categories.find((c) => c.id === catId);
+    if (!cat) return [];
+    return cat.cameras || [];
+  }
+
+  _updateFavoriteBadges() {
+    if (!this.shadowRoot || !this._hass) return;
+    const favCount = Object.values(this._hass.states).filter(
+      (s) => s.entity_id.startsWith("camera.") && s.attributes?.is_favorite
+    ).length;
+    const favBadge = this.shadowRoot.querySelector('.badge-count[data-cat="fav"]');
+    if (favBadge) {
+      favBadge.textContent = String(favCount);
+    }
+  }
+
+  _selectCategory(catId) {
+    if (this._activeCatId === catId) return;
+    this._activeCatId = catId;
+    this._currentPage = 0;
+    try {
+      localStorage.setItem("akvilon_camera_hub_cat", catId);
+    } catch (e) {}
+
+    const items = this.shadowRoot.querySelectorAll(".menu-item");
+    items.forEach((it) => {
+      if (it.getAttribute("data-cat") === catId) {
+        it.classList.add("active");
+      } else {
+        it.classList.remove("active");
+      }
+    });
+
+    this._renderCurrentPage();
+  }
+
+  _changePage(delta) {
+    this._currentPage += delta;
+    this._renderCurrentPage();
+    const mainEl = this.shadowRoot.querySelector(".hub-main");
+    if (mainEl) {
+      mainEl.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+
+  _renderCurrentPage() {
+    if (!this.shadowRoot) return;
+    const grid = this.shadowRoot.querySelector(".hub-grid");
+    const headerTitle = this.shadowRoot.querySelector(".hub-category-title");
+    const headerSubtitle = this.shadowRoot.querySelector(".hub-category-subtitle");
+    const prevBtn = this.shadowRoot.querySelector(".btn-page-prev");
+    const nextBtn = this.shadowRoot.querySelector(".btn-page-next");
+    const pageIndicator = this.shadowRoot.querySelector(".page-indicator");
+    const paginationBar = this.shadowRoot.querySelector(".pagination-bar");
+
+    if (!grid) return;
+
+    this._clearRenderedCards();
+
+    const cameras = this._getCamerasForCategory(this._activeCatId);
+    const catObj = this._categories.find((c) => c.id === this._activeCatId) || {
+      id: "fav",
+      title: "Избранные камеры",
+      icon: "⭐",
+    };
+
+    if (headerTitle) {
+      headerTitle.textContent = `${catObj.icon || "📹"} ${catObj.title || "Камеры"}`;
+    }
+
+    const total = cameras.length;
+    const totalPages = Math.max(1, Math.ceil(total / this._pageSize));
+
+    if (this._currentPage < 0) this._currentPage = 0;
+    if (this._currentPage >= totalPages) this._currentPage = totalPages - 1;
+
+    const start = this._currentPage * this._pageSize;
+    const end = Math.min(start + this._pageSize, total);
+    const pageSlice = cameras.slice(start, end);
+
+    if (headerSubtitle) {
+      if (total === 0) {
+        headerSubtitle.textContent = "Камеры не выбраны";
+      } else {
+        headerSubtitle.textContent = `Показано: ${start + 1}–${end} из ${total} · Ступенчатая подгрузка без перегрузки CPU`;
+      }
+    }
+
+    if (paginationBar) {
+      if (totalPages > 1) {
+        paginationBar.style.display = "flex";
+        if (prevBtn) prevBtn.disabled = this._currentPage === 0;
+        if (nextBtn) nextBtn.disabled = this._currentPage >= totalPages - 1;
+        if (pageIndicator) {
+          pageIndicator.textContent = `Камеры ${start + 1}–${end} из ${total} (Страница ${this._currentPage + 1} из ${totalPages})`;
+        }
+      } else {
+        paginationBar.style.display = "none";
+      }
+    }
+
+    if (pageSlice.length === 0) {
+      const emptyDiv = document.createElement("div");
+      emptyDiv.className = "empty-state";
+      if (this._activeCatId === "fav") {
+        emptyDiv.innerHTML = `
+          <div class="empty-icon">⭐</div>
+          <div class="empty-title">В избранном пока нет камер</div>
+          <div class="empty-desc">Нажмите на звёздочку (⭐) на любой камере в разделах слева, чтобы добавить её в быстрый доступ.</div>
+        `;
+      } else {
+        emptyDiv.innerHTML = `
+          <div class="empty-icon">📹</div>
+          <div class="empty-title">В этом разделе нет камер</div>
+        `;
+      }
+      grid.appendChild(emptyDiv);
+      return;
+    }
+
+    // Рендерим ровно 4-6 карточек с плавным ступенчатым запуском
+    pageSlice.forEach((cam, idx) => {
+      const card = document.createElement("akvilon-camera-card");
+      card.setConfig({
+        entity: cam.entity,
+        name: cam.name,
+        lazy: true,
+        refresh_interval: 25,
+        stagger_delay: idx * 500, // 0ms, 500ms, 1000ms, 1500ms, 2000ms, 2500ms
+        aspect_ratio: "16/9",
+      });
+      if (this._hass) {
+        card.hass = this._hass;
+      }
+      grid.appendChild(card);
+      this._renderedCards.push(card);
+    });
+  }
+
+  _renderBase() {
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host {
+          display: block;
+          width: 100%;
+          color: var(--primary-text-color, #f4f4f5);
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+          box-sizing: border-box;
+          padding: 8px 0;
+        }
+        * {
+          box-sizing: border-box;
+        }
+        .hub-root {
+          width: 100%;
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+        }
+        .hub-layout {
+          display: flex;
+          gap: 20px;
+          align-items: flex-start;
+          width: 100%;
+        }
+        .hub-sidebar {
+          width: 260px;
+          flex-shrink: 0;
+          background: rgba(24, 24, 27, 0.85);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 16px;
+          padding: 12px;
+          box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+          backdrop-filter: blur(12px);
+          position: sticky;
+          top: 16px;
+        }
+        .sidebar-title {
+          font-size: 11px;
+          font-weight: 700;
+          text-transform: uppercase;
+          letter-spacing: 0.8px;
+          color: #a1a1aa;
+          padding: 4px 10px 10px 10px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+          margin-bottom: 8px;
+        }
+        .menu-list {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+        .menu-item {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 10px 14px;
+          border-radius: 10px;
+          cursor: pointer;
+          color: #d4d4d8;
+          font-size: 14px;
+          font-weight: 500;
+          background: transparent;
+          border: 1px solid transparent;
+          transition: all 0.18s ease;
+          user-select: none;
+        }
+        .menu-item:hover {
+          background: rgba(255, 255, 255, 0.07);
+          color: #ffffff;
+          transform: translateX(2px);
+        }
+        .menu-item.active {
+          background: linear-gradient(90deg, rgba(3, 169, 244, 0.25) 0%, rgba(3, 169, 244, 0.08) 100%);
+          border-color: rgba(3, 169, 244, 0.35);
+          color: #38bdf8;
+          font-weight: 600;
+        }
+        .menu-label {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .menu-icon {
+          font-size: 16px;
+          flex-shrink: 0;
+        }
+        .badge-count {
+          font-size: 11px;
+          font-weight: 700;
+          padding: 2px 7px;
+          border-radius: 10px;
+          background: rgba(255, 255, 255, 0.1);
+          color: #a1a1aa;
+          flex-shrink: 0;
+        }
+        .menu-item.active .badge-count {
+          background: rgba(56, 189, 248, 0.3);
+          color: #38bdf8;
+        }
+        .hub-main {
+          flex: 1;
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+        }
+        .main-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          background: rgba(24, 24, 27, 0.6);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 14px;
+          padding: 12px 18px;
+        }
+        .hub-category-title {
+          font-size: 17px;
+          font-weight: 700;
+          color: #ffffff;
+          margin: 0;
+        }
+        .hub-category-subtitle {
+          font-size: 12px;
+          color: #a1a1aa;
+          margin-top: 3px;
+        }
+        .hub-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 18px;
+          width: 100%;
+        }
+        .pagination-bar {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 14px;
+          padding: 12px;
+          background: rgba(24, 24, 27, 0.6);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 14px;
+          margin-top: 6px;
+        }
+        .btn-page {
+          background: rgba(255, 255, 255, 0.08);
+          border: 1px solid rgba(255, 255, 255, 0.15);
+          color: #ffffff;
+          padding: 8px 16px;
+          border-radius: 9px;
+          font-size: 13px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.2s ease;
+        }
+        .btn-page:hover:not(:disabled) {
+          background: rgba(3, 169, 244, 0.3);
+          border-color: rgba(3, 169, 244, 0.5);
+          transform: translateY(-1px);
+        }
+        .btn-page:disabled {
+          opacity: 0.35;
+          cursor: not-allowed;
+        }
+        .page-indicator {
+          font-size: 13px;
+          font-weight: 500;
+          color: #d4d4d8;
+        }
+        .empty-state {
+          grid-column: 1 / -1;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          padding: 60px 20px;
+          background: rgba(24, 24, 27, 0.4);
+          border: 1px dashed rgba(255, 255, 255, 0.15);
+          border-radius: 16px;
+          text-align: center;
+        }
+        .empty-icon {
+          font-size: 40px;
+          margin-bottom: 12px;
+        }
+        .empty-title {
+          font-size: 16px;
+          font-weight: 600;
+          color: #ffffff;
+          margin-bottom: 6px;
+        }
+        .empty-desc {
+          font-size: 13px;
+          color: #a1a1aa;
+          max-width: 440px;
+          line-height: 1.5;
+        }
+        @media (max-width: 900px) {
+          .hub-grid {
+            grid-template-columns: 1fr;
+            gap: 14px;
+          }
+        }
+        @media (max-width: 768px) {
+          .hub-layout {
+            flex-direction: column;
+            gap: 12px;
+          }
+          .hub-sidebar {
+            width: 100%;
+            position: static;
+            padding: 8px;
+            overflow: hidden;
+          }
+          .sidebar-title {
+            display: none;
+          }
+          .menu-list {
+            flex-direction: row;
+            overflow-x: auto;
+            gap: 8px;
+            padding-bottom: 4px;
+            white-space: nowrap;
+            -webkit-overflow-scrolling: touch;
+          }
+          .menu-item {
+            flex-shrink: 0;
+            padding: 8px 12px;
+          }
+        }
+      </style>
+
+      <div class="hub-root">
+        <div class="hub-layout">
+          <!-- Боковое меню разделов -->
+          <div class="hub-sidebar">
+            <div class="sidebar-title">Разделы камер</div>
+            <div class="menu-list">
+              ${this._renderMenuItems()}
+            </div>
+          </div>
+
+          <!-- Основная область с камерами (4-6 штук) -->
+          <div class="hub-main">
+            <div class="main-header">
+              <div>
+                <div class="hub-category-title">Камеры</div>
+                <div class="hub-category-subtitle">Загрузка...</div>
+              </div>
+            </div>
+
+            <div class="hub-grid"></div>
+
+            <div class="pagination-bar" style="display: none;">
+              <button class="btn-page btn-page-prev">◀ Назад</button>
+              <div class="page-indicator">Страница 1</div>
+              <button class="btn-page btn-page-next">Вперёд ▶</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const items = this.shadowRoot.querySelectorAll(".menu-item");
+    items.forEach((it) => {
+      it.addEventListener("click", () => {
+        const catId = it.getAttribute("data-cat");
+        this._selectCategory(catId);
+      });
+    });
+
+    const prevBtn = this.shadowRoot.querySelector(".btn-page-prev");
+    const nextBtn = this.shadowRoot.querySelector(".btn-page-next");
+    if (prevBtn) prevBtn.addEventListener("click", () => this._changePage(-1));
+    if (nextBtn) nextBtn.addEventListener("click", () => this._changePage(1));
+
+    this._renderCurrentPage();
+  }
+
+  _renderMenuItems() {
+    return this._categories
+      .map((cat) => {
+        const isActive = cat.id === this._activeCatId ? " active" : "";
+        const count = (cat.cameras || []).length;
+        return `
+          <div class="menu-item${isActive}" data-cat="${cat.id}">
+            <div class="menu-label">
+              <span class="menu-icon">${cat.icon || "📹"}</span>
+              <span>${cat.title}</span>
+            </div>
+            <span class="badge-count" data-cat="${cat.id}">${count}</span>
+          </div>
+        `;
+      })
+      .join("");
+  }
+}
+
+customElements.define("akvilon-camera-hub", AkvilonCameraHub);
+
 // Регистрация в списке customCards Home Assistant
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "akvilon-camera-card",
   name: "Akvilon Camera Card (Smart Cache & Live)",
   description: "Крупная карточка камеры с мгновенным кэшем снимков, полноэкранным Live-режимом и избранным.",
+  preview: true,
+  documentationURL: "https://github.com/Gakuzi/akvilon_home",
+});
+window.customCards.push({
+  type: "akvilon-camera-hub",
+  name: "Akvilon Camera Hub (Sidebar & Groups)",
+  description: "Хаб камер с боковым меню разделов (двор, улица, парадные, лифты), пагинацией по 4-6 крупных камер и плавной ступенчатой подгрузкой.",
   preview: true,
   documentationURL: "https://github.com/Gakuzi/akvilon_home",
 });

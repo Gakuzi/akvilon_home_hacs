@@ -186,13 +186,18 @@ class TestDashboardAndFavorites(unittest.TestCase):
         views = payload["data"]["config"]["views"]
         cam_view = next(v for v in views if v["path"] == "cameras")
         self.assertIsNotNone(cam_view)
-        # Проверяем карточки камер
+        # Проверяем наличие карточки AkvilonCameraHub
         cards = cam_view.get("cards", [])
-        grid_cards = [c for c in cards if c.get("type") == "grid"]
-        for g in grid_cards:
-            for card in g.get("cards", []):
-                if card.get("type") == "custom:akvilon-camera-card":
-                    self.assertTrue(card.get("lazy"))
+        hub_card = next((c for c in cards if c.get("type") == "custom:akvilon-camera-hub"), None)
+        self.assertIsNotNone(hub_card)
+        self.assertEqual(hub_card.get("page_size"), 6)
+        cat_ids = [c["id"] for c in hub_card.get("categories", [])]
+        self.assertIn("fav", cat_ids)
+        self.assertIn("dvor", cat_ids)
+        self.assertIn("ulica", cat_ids)
+        self.assertIn("parad", cat_ids)
+        self.assertIn("lift", cat_ids)
+        self.assertIn("kolias", cat_ids)
 
     def test_favorite_cameras_coordinator(self):
         from custom_components.akvilon_home.coordinator import AkvilonHub
@@ -201,15 +206,17 @@ class TestDashboardAndFavorites(unittest.TestCase):
         hub.set_favorite_camera("111:69724", True)
         self.assertTrue(hub.is_favorite_camera("111:69724"))
         hub.set_favorite_camera("111:69724", False)
+
     def test_camera_grid_columns_large_preview(self):
         from custom_components.akvilon_home.dashboard import build_dashboard_payload
         payload = build_dashboard_payload(hass=None, hub=None)
         views = payload["data"]["config"]["views"]
-        cam_view = next(v for v in views if v["path"] == "cameras")
-        cards = cam_view.get("cards", [])
+        overview_view = next(v for v in views if v["path"] == "overview")
+        cards = overview_view.get("cards", [])
         grid_cards = [c for c in cards if c.get("type") == "grid"]
-        for g in grid_cards:
-            self.assertEqual(g.get("columns"), 2)
+        fav_grid = next((g for g in grid_cards if any(cd.get("type") == "custom:akvilon-camera-card" for cd in g.get("cards", []))), None)
+        if fav_grid:
+            self.assertEqual(fav_grid.get("columns"), 2)
 
 
 if __name__ == "__main__":

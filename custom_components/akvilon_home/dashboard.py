@@ -399,80 +399,124 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
     # =========================================================================
     # ВИД 2: КАМЕРЫ (Cameras)
     # =========================================================================
-    camera_cards = []
-
-    camera_cards.append({
-        "type": "heading",
-        "heading": "Камеры видеонаблюдения ЖК «Река»",
-        "heading_style": "title",
-        "icon": "mdi:cctv",
-    })
-
-    # Блок избранных камер вверху страницы
-    camera_cards.append({
-        "type": "heading",
-        "heading": "⭐ Избранные камеры (Быстрый просмотр)",
-        "heading_style": "subtitle",
-    })
-    if fav_cards:
-        camera_cards.append({
-            "type": "grid",
-            "columns": 2,
-            "square": False,
-            "cards": fav_cards,
-        })
-
-    # Группировка всех остальных камер по зонам для удобства
+    # =========================================================================
+    # ВИД 2: КАМЕРЫ (Cameras) — Интерактивный хаб с боковым меню и пагинацией
+    # =========================================================================
     zone_dvor = []
-    zone_paradnye = []
     zone_ulitsa = []
-    zone_reka = []
+    zone_paradnye = []
+    zone_lift = []
+    zone_kolias = []
+    zone_reka7 = []
+    zone_reka6 = []
+    zone_reka5 = []
     zone_other = []
 
     for c in cam_ids:
         clow = c.lower()
-        if any(k in clow for k in ("dvor", "двор", "prokhod", "detskaia", "torets")):
+        fn = r.get_friendly_name(c).lower()
+        if any(k in clow or k in fn for k in ("lift", "лифт", "kholl_lifta", "холл лифта")):
+            zone_lift.append(c)
+        elif any(k in clow or k in fn for k in ("koliasochnaia", "колясочная", "prokhod", "проход")):
+            zone_kolias.append(c)
+        elif any(k in clow or k in fn for k in ("dvor", "двор", "detskaia", "детская")):
             zone_dvor.append(c)
-        elif any(k in clow for k in ("paradnaia", "парадная", "kholl", "холл", "lift", "лифт", "koliasochnaia", "podezd", "подъезд")):
-            zone_paradnye.append(c)
-        elif any(k in clow for k in ("sovetskaia", "советская", "proezd", "проезд", "vid_na_kalitku")):
+        elif any(k in clow or k in fn for k in ("sovetskaia", "советская", "proezd", "проезд")):
             zone_ulitsa.append(c)
-        elif "reka" in clow:
-            zone_reka.append(c)
+        elif any(k in clow or k in fn for k in ("paradnaia", "парадная", "podezd", "подъезд")):
+            zone_paradnye.append(c)
+        elif "reka_7" in clow or "река 7" in fn:
+            zone_reka7.append(c)
+        elif "reka_6" in clow or "река 6" in fn:
+            zone_reka6.append(c)
+        elif "reka_5" in clow or "река 5" in fn:
+            zone_reka5.append(c)
         else:
             zone_other.append(c)
 
-    def cam_grid(cams: list[str]) -> list:
-        return [
-            {
-                "type": "custom:akvilon-camera-card",
-                "entity": c,
-                "name": r.get_friendly_name(c),
-                "lazy": True,
-                "refresh_interval": 20,
-            }
-            for c in cams
-        ]
+    def to_cam_objs(cams: list[str]) -> list[dict]:
+        return [{"entity": c, "name": r.get_friendly_name(c)} for c in cams]
 
-    if zone_dvor:
-        camera_cards.append({"type": "heading", "heading": "🏡 Двор и придомовая территория", "heading_style": "subtitle"})
-        camera_cards.append({"type": "grid", "columns": 2, "square": False, "cards": cam_grid(zone_dvor)})
-
-    if zone_paradnye:
-        camera_cards.append({"type": "heading", "heading": "🚪 Парадные, холлы и лифты", "heading_style": "subtitle"})
-        camera_cards.append({"type": "grid", "columns": 2, "square": False, "cards": cam_grid(zone_paradnye)})
-
-    if zone_ulitsa:
-        camera_cards.append({"type": "heading", "heading": "🚗 Улица Советская и въезды", "heading_style": "subtitle"})
-        camera_cards.append({"type": "grid", "columns": 2, "square": False, "cards": cam_grid(zone_ulitsa)})
-
-    if zone_reka:
-        camera_cards.append({"type": "heading", "heading": "🏢 Корпуса и периметр ЖК «Река»", "heading_style": "subtitle"})
-        camera_cards.append({"type": "grid", "columns": 2, "square": False, "cards": cam_grid(zone_reka)})
+    camera_categories = [
+        {
+            "id": "fav",
+            "title": "Избранные камеры",
+            "icon": "⭐",
+            "cameras": to_cam_objs(fav_cams),
+        },
+        {
+            "id": "dvor",
+            "title": "Двор и площадка",
+            "icon": "🌳",
+            "cameras": to_cam_objs(zone_dvor),
+        },
+        {
+            "id": "ulica",
+            "title": "Улица и въезды",
+            "icon": "🚗",
+            "cameras": to_cam_objs(zone_ulitsa),
+        },
+        {
+            "id": "parad",
+            "title": "Парадные и подъезды",
+            "icon": "🚪",
+            "cameras": to_cam_objs(zone_paradnye),
+        },
+        {
+            "id": "lift",
+            "title": "Лифты и холлы",
+            "icon": "🛗",
+            "cameras": to_cam_objs(zone_lift),
+        },
+        {
+            "id": "kolias",
+            "title": "Колясочные и проходы",
+            "icon": "🚲",
+            "cameras": to_cam_objs(zone_kolias),
+        },
+        {
+            "id": "reka7",
+            "title": "Корпус «Река 7»",
+            "icon": "🏢",
+            "cameras": to_cam_objs(zone_reka7),
+        },
+        {
+            "id": "reka6",
+            "title": "Корпус «Река 6»",
+            "icon": "🏢",
+            "cameras": to_cam_objs(zone_reka6),
+        },
+        {
+            "id": "reka5",
+            "title": "Корпус «Река 5»",
+            "icon": "🏢",
+            "cameras": to_cam_objs(zone_reka5),
+        },
+    ]
 
     if zone_other:
-        camera_cards.append({"type": "heading", "heading": "Другие камеры", "heading_style": "subtitle"})
-        camera_cards.append({"type": "grid", "columns": 2, "square": False, "cards": cam_grid(zone_other)})
+        camera_categories.append({
+            "id": "other",
+            "title": "Другие камеры",
+            "icon": "📹",
+            "cameras": to_cam_objs(zone_other),
+        })
+
+    camera_categories.append({
+        "id": "all",
+        "title": "Все камеры",
+        "icon": "📹",
+        "cameras": to_cam_objs(cam_ids),
+    })
+
+    camera_cards = [
+        {
+            "type": "custom:akvilon-camera-hub",
+            "title": "Видеонаблюдение ЖК «Река»",
+            "page_size": 6,
+            "categories": camera_categories,
+        }
+    ]
 
     # =========================================================================
     # ВИД 3: КАЛИТКИ И ВОРОТА (Gates)
@@ -767,6 +811,7 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
             "title": "Камеры",
             "icon": "mdi:cctv",
             "path": "cameras",
+            "type": "panel",
             "cards": camera_cards,
         },
         {
@@ -924,7 +969,7 @@ def _install_resource(hass: Any = None):
         changed = False
         for _, res_rel in cards:
             base_url = f"/{res_rel}"
-            versioned_url = f"/{res_rel}?v=2.2"
+            versioned_url = f"/{res_rel}?v=2.4"
             existing = next((i for i in items if i.get("url", "").startswith(base_url)), None)
             if existing:
                 if existing.get("url") != versioned_url:
