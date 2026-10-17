@@ -647,9 +647,9 @@ class AkvilonHub:
         if not acquired_sem:
             with self._cache_lock:
                 cached = self._frame_cache.get(sid)
-                if cached and (time.time() - cached[1]) < 60.0:
+                if cached:
                     return cached[0]
-            return cached[0] if cached else None
+            return None
 
         try:
             with lock:

@@ -6,6 +6,8 @@
 b"\x00\x00"+videoToken -> RTP/H.264 -> JPEG. Атрибуты берутся ТОЛЬКО из кэша
 _video_settings (без блокировки event loop).
 """
+from __future__ import annotations
+
 import logging
 
 from homeassistant.components.camera import Camera
@@ -39,6 +41,7 @@ class AkvilonCamera(Camera):
         self.cam_id = cam_id
         self._name = name
         self._attr_unique_id = f"{DOMAIN}_cam_{cam_id.replace(':', '_')}"
+        self._last_image: bytes | None = None
 
     @property
     def name(self):
@@ -86,9 +89,13 @@ class AkvilonCamera(Camera):
         """Возвращает реальный JPEG-кадр камеры (с умным кэшированием и fallback)."""
         hub = self._hub
         cam_id = self.cam_id
-        return await self.hass.async_add_executor_job(
+        img = await self.hass.async_add_executor_job(
             hub.camera_frame, cam_id, 3.5, 20.0
         )
+        if img:
+            self._last_image = img
+            return img
+        return self._last_image
 
 
 async def async_setup_entry(

@@ -456,23 +456,23 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
 
     if zone_dvor:
         camera_cards.append({"type": "heading", "heading": "🏡 Двор и придомовая территория", "heading_style": "subtitle"})
-        camera_cards.append({"type": "grid", "columns": 3, "square": False, "cards": cam_grid(zone_dvor)})
+        camera_cards.append({"type": "grid", "columns": 2, "square": False, "cards": cam_grid(zone_dvor)})
 
     if zone_paradnye:
         camera_cards.append({"type": "heading", "heading": "🚪 Парадные, холлы и лифты", "heading_style": "subtitle"})
-        camera_cards.append({"type": "grid", "columns": 3, "square": False, "cards": cam_grid(zone_paradnye)})
+        camera_cards.append({"type": "grid", "columns": 2, "square": False, "cards": cam_grid(zone_paradnye)})
 
     if zone_ulitsa:
         camera_cards.append({"type": "heading", "heading": "🚗 Улица Советская и въезды", "heading_style": "subtitle"})
-        camera_cards.append({"type": "grid", "columns": 3, "square": False, "cards": cam_grid(zone_ulitsa)})
+        camera_cards.append({"type": "grid", "columns": 2, "square": False, "cards": cam_grid(zone_ulitsa)})
 
     if zone_reka:
         camera_cards.append({"type": "heading", "heading": "🏢 Корпуса и периметр ЖК «Река»", "heading_style": "subtitle"})
-        camera_cards.append({"type": "grid", "columns": 3, "square": False, "cards": cam_grid(zone_reka)})
+        camera_cards.append({"type": "grid", "columns": 2, "square": False, "cards": cam_grid(zone_reka)})
 
     if zone_other:
         camera_cards.append({"type": "heading", "heading": "Другие камеры", "heading_style": "subtitle"})
-        camera_cards.append({"type": "grid", "columns": 3, "square": False, "cards": cam_grid(zone_other)})
+        camera_cards.append({"type": "grid", "columns": 2, "square": False, "cards": cam_grid(zone_other)})
 
     # =========================================================================
     # ВИД 3: КАЛИТКИ И ВОРОТА (Gates)
@@ -758,52 +758,52 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
     # =========================================================================
     views = [
         {
-            "type": "sections",
             "title": "Обзор",
             "icon": "mdi:home-analytics",
             "path": "overview",
+            "cards": overview_cards,
             "sections": [{"type": "grid", "cards": overview_cards}],
         },
         {
-            "type": "sections",
             "title": "Камеры",
             "icon": "mdi:cctv",
             "path": "cameras",
+            "cards": camera_cards,
             "sections": [{"type": "grid", "cards": camera_cards}],
         },
         {
-            "type": "sections",
             "title": "Калитки",
             "icon": "mdi:gate",
             "path": "gates",
+            "cards": gate_cards,
             "sections": [{"type": "grid", "cards": gate_cards}],
         },
         {
-            "type": "sections",
             "title": "Домофоны",
             "icon": "mdi:phone-in-talk",
             "path": "intercoms",
+            "cards": intercom_cards,
             "sections": [{"type": "grid", "cards": intercom_cards}],
         },
         {
-            "type": "sections",
             "title": "Счётчики",
             "icon": "mdi:counter",
             "path": "meters",
+            "cards": meter_cards,
             "sections": [{"type": "grid", "cards": meter_cards}],
         },
         {
-            "type": "sections",
             "title": "Диагностика",
             "icon": "mdi:server-network",
             "path": "diagnostics",
+            "cards": diag_cards,
             "sections": [{"type": "grid", "cards": diag_cards}],
         },
         {
-            "type": "sections",
             "title": "Киоск",
             "icon": "mdi:tablet-dashboard",
             "path": "kiosk",
+            "cards": kiosk_cards,
             "sections": [{"type": "grid", "cards": kiosk_cards}],
         },
     ]
@@ -935,15 +935,21 @@ def _install_resource(hass: Any = None):
 
         changed = False
         for _, res_rel in cards:
-            url = f"/{res_rel}"
-            if not any(i.get("url") == url for i in items):
+            base_url = f"/{res_rel}"
+            versioned_url = f"/{res_rel}?v=2.2"
+            existing = next((i for i in items if i.get("url", "").startswith(base_url)), None)
+            if existing:
+                if existing.get("url") != versioned_url:
+                    existing["url"] = versioned_url
+                    changed = True
+            else:
                 items.append({
                     "id": uuid.uuid4().hex,
                     "type": "module",
-                    "url": url,
+                    "url": versioned_url,
                 })
                 changed = True
-                _LOGGER.info("Аквилон: JS-ресурс %s зарегистрирован в lovelace_resources", res_rel)
+                _LOGGER.info("Аквилон: JS-ресурс %s зарегистрирован в lovelace_resources", versioned_url)
 
         if changed:
             json.dump(res, open(res_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)

@@ -184,16 +184,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return {"ok": True}
 
     async def _handle_set_favorite_camera(call):
-        """Добавить или удалить камеру из избранных."""
-        cam_id = str(call.data.get("camera_id", ""))
-        fav = bool(call.data.get("favorite", True))
-        if cam_id:
-            hub.set_favorite_camera(cam_id, fav)
-            new_favs = list(hub.favorite_cameras)
-            new_options = dict(entry.options)
-            new_options["favorite_cameras"] = new_favs
-            hass.config_entries.async_update_entry(entry, options=new_options)
-        return {"favorite_cameras": list(hub.favorite_cameras)}
+        """Добавить или удалить камеру из избранных (поддерживает camera_id и entity_id, toggle)."""
+        cam_id = str(call.data.get("camera_id") or "")
+        entity_id = str(call.data.get("entity_id") or "")
+
+        # Если передан entity_id (например, camera.kamera_dvor_2), извлекаем cam_id из attributes
+        if not cam_id and entity_id:
+            st = hass.states.get(entity_id)
+            if st and st.attributes:
+                cam_id = str(st.attributes.get("object_id") or st.attributes.get("cam_id") or "")
+            if not cam_id:
+                for c in hub.cameras:
+                    cid = str(c.get("objectid") or c.get("objectId") or c.get("id") or "")
+                    cname = str(c.get("name") or "").lower()
+                    if cid in entity_id or (cname and cname in entity_id.lower()):
+                        cam_id = cid
+                        break
+
+        if not cam_id:
+            _LOGGER.warning("Аквилон: не удалось определить ID камеры для избранного: %s", call.data)
+            return {"ok": False}
+
+        is_fav = hub.is_favorite_camera(cam_id)
+        if "favorite" in call.data:
+            target_fav = bool(call.data.get("favorite"))
+        else:
+            target_fav = not is_fav
+
+        hub.set_favorite_camera(cam_id, target_fav)
+        new_favs = list(hub.favorite_cameras)
+        new_options = dict(entry.options)
+        new_options["favorite_cameras"] = new_favs
+        hass.config_entries.async_update_entry(entry, options=new_options)
+
+        # Обновляем состояние сущности камеры в HA, чтобы UI среагировал мгновенно
+        if entity_id:
+            st = hass.states.get(entity_id)
+            if st:
+                new_attrs = dict(st.attributes)
+                new_attrs["is_favorite"] = target_fav
+                hass.states.async_set(entity_id, st.state, new_attrs)
+
+        # Перестраиваем Lovelace-дашборд с обновленным списком избранных камер
+        try:
+            from .dashboard import ensure_dashboard
+            await hass.async_add_executor_job(ensure_dashboard, hass, hub)
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.debug("Аквилон: обновление дашборда после изменения избранного: %s", exc)
+
+        _LOGGER.info("Аквилон: камера %s %s в избранное", cam_id, "добавлена" if target_fav else "удалена из")
+        return {"camera_id": cam_id, "is_favorite": target_fav, "favorite_cameras": new_favs}
 
     async def _handle_refresh(call):
         """Принудительно обновить списки и данные с сервера."""
@@ -209,6 +249,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, "simulate_call", _handle_simulate_call)
     hass.services.async_register(DOMAIN, "clear_call", _handle_clear_call)
     hass.services.async_register(DOMAIN, "set_favorite_camera", _handle_set_favorite_camera)
+    hass.services.async_register(DOMAIN, "toggle_favorite_camera", _handle_set_favorite_camera)
     hass.services.async_register(DOMAIN, "refresh", _handle_refresh)
 
     # Устанавливаем флаг "setup завершается фоном" — создаём сущности,

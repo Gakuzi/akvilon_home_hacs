@@ -80,3 +80,47 @@ voice_stop:
   name: Голосовой канал — завершить
   description: Закрыть активный голосовой канал домофона (положить трубку)
   fields: {}
+
+set_favorite_camera:
+  name: Добавить/удалить камеру из избранного
+  description: Добавляет или удаляет камеру видеонаблюдения из блока избранных камер вверху дашборда
+  fields:
+    camera_id:
+      name: ID камеры
+      description: Внутренний ID камеры (например "111:69724")
+      required: false
+      example: "111:69724"
+      selector:
+        text:
+    entity_id:
+      name: Сущность камеры
+      description: ID сущности камеры в Home Assistant
+      required: false
+      example: "camera.kamera_dvor_2"
+      selector:
+        entity:
+          domain: camera
+    favorite:
+      name: В избранном
+      description: true — добавить в избранное, false — убрать
+      required: false
+      selector:
+        boolean:
+
+toggle_favorite_camera:
+  name: Переключить избранное камеры
+  description: Переключает статус избранного для камеры (добавляет или убирает)
+  fields:
+    camera_id:
+      name: ID камеры
+      required: false
+      example: "111:69724"
+      selector:
+        text:
+    entity_id:
+      name: Сущность камеры
+      required: false
+      example: "camera.kamera_dvor_2"
+      selector:
+        entity:
+          domain: camera
