@@ -41,7 +41,7 @@ class AkvilonHub:
         self._frame_locks = {}     # cam_id -> threading.Lock
         self._cache_lock = threading.Lock()
         self._last_camera_open = {}  # cam_id -> float timestamp of last openCamera request
-        self._global_frame_sem = threading.Semaphore(2)  # max 2 concurrent camera frame grabs
+        self._global_frame_sem = threading.Semaphore(1)  # max 1 concurrent camera frame grab (защита CPU и RAM)
         self._last_ok = 0.0  # monotonic метка последнего успешного опроса сервера
         self._last_count = 0
         self.ping_ms = 0.0
@@ -617,20 +617,20 @@ class AkvilonHub:
             return f"rtsp://{vhost}:{vport}/cameras/{str(cam_id).replace(':', '_')}"
         return ""
 
-    def camera_frame(self, cam_id: str, timeout: float = 4.5, max_age: float = 3.5) -> bytes | None:
+    def camera_frame(self, cam_id: str, timeout: float = 3.5, max_age: float = 20.0) -> bytes | None:
         """Захватывает реальный кадр камеры (JPEG) через RTP с умным кэшированием.
 
         - Если свежий кадр уже в кэше (< max_age сек) — отдаёт мгновенно (0мс).
         - Параллельные запросы к одной камере объединяются через lock.
-        - Глобальный семафор (Semaphore=2) предотвращает перегрузку сервера здания
+        - Глобальный семафор (Semaphore=1) предотвращает перегрузку сервера здания
           и процессора слабых устройств (Raspberry Pi).
+        - При занятом семафоре мгновенно отдаёт последний кэшированный кадр без блокировки потока.
         - Автоматически обновляет подписку openCamera, если она истекла.
-        - При таймауте отдаёт fallback (последний известный кадр).
         """
         sid = str(cam_id)
         now = time.time()
 
-        # Быстрый возврат из кэша
+        # 1. Мгновенный возврат из кэша (0мс), если кадр моложе max_age
         with self._cache_lock:
             cached = self._frame_cache.get(sid)
             if cached:
@@ -639,16 +639,15 @@ class AkvilonHub:
                     return frame
             lock = self._frame_locks.setdefault(sid, threading.Lock())
 
-        # Если глобальный семафор занят, а в кэше есть кадр моложе 15 сек — отдаём его сразу
-        acquired_sem = self._global_frame_sem.acquire(timeout=0.6)
+        # 2. Неблокирующий семафор: если уже идёт декодирование другой камеры,
+        # возвращаем последний известный кадр (до 60с) или None, не забивая пул executor'а
+        acquired_sem = self._global_frame_sem.acquire(timeout=0.25)
         if not acquired_sem:
             with self._cache_lock:
                 cached = self._frame_cache.get(sid)
-                if cached and (time.time() - cached[1]) < 15.0:
+                if cached and (time.time() - cached[1]) < 60.0:
                     return cached[0]
-            acquired_sem = self._global_frame_sem.acquire(timeout=3.0)
-            if not acquired_sem:
-                return cached[0] if cached else None
+            return cached[0] if cached else None
 
         try:
             with lock:
@@ -657,8 +656,14 @@ class AkvilonHub:
                 if cached and (now - cached[1]) < max_age:
                     return cached[0]
 
+                # Защита от спама: не долбить одну камеру чаще раза в 5 сек при ошибках
+                last_attempt = self._last_camera_open.get(f"attempt_{sid}", 0)
+                if (now - last_attempt) < 5.0 and cached:
+                    return cached[0]
+                self._last_camera_open[f"attempt_{sid}"] = now
+
                 try:
-                    need_open = (now - self._last_camera_open.get(sid, 0)) > 20.0
+                    need_open = (now - self._last_camera_open.get(sid, 0)) > 25.0
                     settings = self.get_camera_settings(sid, force_refresh=need_open)
                     if not settings or not settings.get("videoPort"):
                         _LOGGER.debug("Аквилон: нет настроек потока для камеры %s", sid)

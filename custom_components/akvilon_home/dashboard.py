@@ -26,6 +26,7 @@ DASH_KEY = "lovelace.dashboard_akvilon"
 STORAGE_DIR = "/config/.storage"
 
 INTERCOM_CARD_RESOURCE = "local/akvilon/akvilon-intercom-card.js"
+CAMERA_CARD_RESOURCE = "local/akvilon/akvilon-camera-card.js"
 WWW_RESOURCE = "/config/www/akvilon/akvilon-intercom-card.js"
 
 _AUTO_SUFFIX = ("_2", "_3", "_4", "_5")
@@ -309,12 +310,11 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
     })
     fav_cards = [
         {
-            "type": "picture-entity",
+            "type": "custom:akvilon-camera-card",
             "entity": c,
-            "camera_view": "auto",
-            "show_state": False,
-            "show_name": True,
             "name": r.get_friendly_name(c),
+            "lazy": False,
+            "refresh_interval": 15,
         }
         for c in fav_cams
     ]
@@ -430,12 +430,11 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
     def cam_grid(cams: list[str]) -> list:
         return [
             {
-                "type": "picture-entity",
+                "type": "custom:akvilon-camera-card",
                 "entity": c,
-                "camera_view": "auto",
-                "show_state": False,
-                "show_name": True,
                 "name": r.get_friendly_name(c),
+                "lazy": True,
+                "refresh_interval": 20,
             }
             for c in cams
         ]
@@ -867,36 +866,42 @@ def _register_dashboard(storage_dir: str):
 
 
 def _install_resource(hass: Any = None):
-    """Копирует custom-карточку домофона в www/akvilon/ и регистрирует в lovelace_resources."""
+    """Копирует custom-карточки (домофон, умная камера) в www/akvilon/ и регистрирует в lovelace_resources."""
+    import uuid
     www_dir = _get_www_dir(hass)
     storage_dir = _get_storage_dir(hass)
 
-    # 1. Копирование файла akvilon-intercom-card.js
-    try:
-        dest_dir = os.path.join(www_dir, "akvilon")
-        os.makedirs(dest_dir, exist_ok=True)
-        dest_file = os.path.join(dest_dir, "akvilon-intercom-card.js")
+    cards = [
+        ("akvilon-intercom-card.js", INTERCOM_CARD_RESOURCE),
+        ("akvilon-camera-card.js", CAMERA_CARD_RESOURCE),
+    ]
 
-        search_dirs = [
-            os.path.join(os.path.dirname(__file__), "dashboard"),
-            os.path.dirname(__file__),
-            "/Users/evgeniy/akvilon_home/dashboard",
-            "/config/custom_components/akvilon_home/dashboard",
-        ]
-        src_file = None
-        for d in search_dirs:
-            cand = os.path.join(d, "akvilon-intercom-card.js")
-            if os.path.exists(cand):
-                src_file = cand
-                break
+    for fname, res_rel in cards:
+        try:
+            dest_dir = os.path.join(www_dir, "akvilon")
+            os.makedirs(dest_dir, exist_ok=True)
+            dest_file = os.path.join(dest_dir, fname)
 
-        if src_file:
-            shutil.copyfile(src_file, dest_file)
-            _LOGGER.info("Аквилон: custom-карточка установлена в %s", dest_file)
-    except Exception as exc:  # pragma: no cover
-        _LOGGER.warning("Аквилон: не удалось скопировать JS-ресурс: %s", exc)
+            search_dirs = [
+                os.path.join(os.path.dirname(__file__), "dashboard"),
+                os.path.dirname(__file__),
+                "/Users/evgeniy/akvilon_home/dashboard",
+                "/config/custom_components/akvilon_home/dashboard",
+            ]
+            src_file = None
+            for d in search_dirs:
+                cand = os.path.join(d, fname)
+                if os.path.exists(cand):
+                    src_file = cand
+                    break
 
-    # 2. Регистрация в lovelace_resources
+            if src_file:
+                shutil.copyfile(src_file, dest_file)
+                _LOGGER.info("Аквилон: custom-карточка %s установлена в %s", fname, dest_file)
+        except Exception as exc:  # pragma: no cover
+            _LOGGER.warning("Аквилон: не удалось скопировать JS-ресурс %s: %s", fname, exc)
+
+    # Регистрация в lovelace_resources с обязательным уникальным ID
     try:
         res_path = os.path.join(storage_dir, "lovelace_resources")
         res = {"version": 1, "minor_version": 1, "key": "lovelace_resources", "data": {"items": []}}
@@ -907,12 +912,28 @@ def _install_resource(hass: Any = None):
                 res = {"version": 1, "minor_version": 1, "key": "lovelace_resources", "data": {"items": []}}
             res.setdefault("data", {}).setdefault("items", [])
         items = res["data"]["items"]
-        if not any(i.get("url") == f"/{INTERCOM_CARD_RESOURCE}" for i in items):
-            items.append({"type": "js", "url": f"/{INTERCOM_CARD_RESOURCE}"})
+
+        # Санитизация: гарантируем, что у каждого элемента есть id
+        for it in items:
+            if not it.get("id"):
+                it["id"] = uuid.uuid4().hex
+
+        changed = False
+        for _, res_rel in cards:
+            url = f"/{res_rel}"
+            if not any(i.get("url") == url for i in items):
+                items.append({
+                    "id": uuid.uuid4().hex,
+                    "type": "module",
+                    "url": url,
+                })
+                changed = True
+                _LOGGER.info("Аквилон: JS-ресурс %s зарегистрирован в lovelace_resources", res_rel)
+
+        if changed:
             json.dump(res, open(res_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-            _LOGGER.info("Аквилон: JS-ресурс %s зарегистрирован в lovelace_resources", INTERCOM_CARD_RESOURCE)
     except Exception as exc:  # pragma: no cover
-        _LOGGER.warning("Аквилон: не удалось зарегистрировать JS-ресурс: %s", exc)
+        _LOGGER.warning("Аквилон: не удалось зарегистрировать JS-ресурсы: %s", exc)
 
 
 def remove_dashboard(hass: Any = None):

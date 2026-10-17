@@ -87,7 +87,7 @@ class AkvilonCamera(Camera):
         hub = self._hub
         cam_id = self.cam_id
         return await self.hass.async_add_executor_job(
-            hub.camera_frame, cam_id, 6.0, 3.5
+            hub.camera_frame, cam_id, 3.5, 20.0
         )
 
 
