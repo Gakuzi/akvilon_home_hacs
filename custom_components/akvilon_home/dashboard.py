@@ -762,49 +762,42 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
             "icon": "mdi:home-analytics",
             "path": "overview",
             "cards": overview_cards,
-            "sections": [{"type": "grid", "cards": overview_cards}],
         },
         {
             "title": "Камеры",
             "icon": "mdi:cctv",
             "path": "cameras",
             "cards": camera_cards,
-            "sections": [{"type": "grid", "cards": camera_cards}],
         },
         {
             "title": "Калитки",
             "icon": "mdi:gate",
             "path": "gates",
             "cards": gate_cards,
-            "sections": [{"type": "grid", "cards": gate_cards}],
         },
         {
             "title": "Домофоны",
             "icon": "mdi:phone-in-talk",
             "path": "intercoms",
             "cards": intercom_cards,
-            "sections": [{"type": "grid", "cards": intercom_cards}],
         },
         {
             "title": "Счётчики",
             "icon": "mdi:counter",
             "path": "meters",
             "cards": meter_cards,
-            "sections": [{"type": "grid", "cards": meter_cards}],
         },
         {
             "title": "Диагностика",
             "icon": "mdi:server-network",
             "path": "diagnostics",
             "cards": diag_cards,
-            "sections": [{"type": "grid", "cards": diag_cards}],
         },
         {
             "title": "Киоск",
             "icon": "mdi:tablet-dashboard",
             "path": "kiosk",
             "cards": kiosk_cards,
-            "sections": [{"type": "grid", "cards": kiosk_cards}],
         },
     ]
 
@@ -868,12 +861,7 @@ def _register_dashboard(storage_dir: str):
         }
         if not any(x.get("id") == "dashboard_akvilon" for x in items):
             items.append(entry)
-        dashboards = data.setdefault("dashboards", {})
-        dashboards["dashboard_akvilon"] = {
-            "mode": "storage",
-            "title": "Аквилон",
-            "icon": "mdi:video-wireless",
-        }
+        data.pop("dashboards", None)
         json.dump(reg, open(reg_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         _LOGGER.info("Аквилон: дашборд зарегистрирован в lovelace_dashboards")
     except Exception as exc:  # pragma: no cover

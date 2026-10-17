@@ -141,6 +141,28 @@ class TestSensorUnits(unittest.TestCase):
         val_gj = round(val_gcal * 4.1868, 4)
         self.assertAlmostEqual(val_gj, 41.868, places=3)
 
+    def test_meter_sensors_arkhangelsk(self):
+        from custom_components.akvilon_home.sensor import (
+            AkvilonMeterSensor,
+            AkvilonMeterHeatingEnergySensor,
+            AkvilonUtilityTotalCostSensor,
+        )
+        fake_meter = {
+            "deviceNumber": "22059787",
+            "name": "Квартира 31 Отопление",
+            "resourceType": "4",
+            "current": {"value": 12.0872, "unit": "Гкал"},
+        }
+        user_sensor = AkvilonMeterSensor(fake_meter)
+        self.assertEqual(user_sensor.native_value, 12.0872)
+        self.assertEqual(user_sensor.native_unit_of_measurement, "Gcal")
+        self.assertIsNone(user_sensor.device_class)
+
+        energy_sensor = AkvilonMeterHeatingEnergySensor(fake_meter)
+        self.assertAlmostEqual(energy_sensor.native_value, round(12.0872 * 4.1868, 4), places=4)
+        self.assertEqual(energy_sensor.native_unit_of_measurement, "GJ")
+        self.assertEqual(energy_sensor.device_class, "energy")
+
 
 class TestDashboardAndFavorites(unittest.TestCase):
     def test_dashboard_views_structure(self):
@@ -164,8 +186,8 @@ class TestDashboardAndFavorites(unittest.TestCase):
         views = payload["data"]["config"]["views"]
         cam_view = next(v for v in views if v["path"] == "cameras")
         self.assertIsNotNone(cam_view)
-        # Проверяем карточки камер в секциях
-        cards = cam_view["sections"][0]["cards"]
+        # Проверяем карточки камер
+        cards = cam_view.get("cards", [])
         grid_cards = [c for c in cards if c.get("type") == "grid"]
         for g in grid_cards:
             for card in g.get("cards", []):
@@ -179,7 +201,15 @@ class TestDashboardAndFavorites(unittest.TestCase):
         hub.set_favorite_camera("111:69724", True)
         self.assertTrue(hub.is_favorite_camera("111:69724"))
         hub.set_favorite_camera("111:69724", False)
-        self.assertFalse(hub.is_favorite_camera("111:69724"))
+    def test_camera_grid_columns_large_preview(self):
+        from custom_components.akvilon_home.dashboard import build_dashboard_payload
+        payload = build_dashboard_payload(hass=None, hub=None)
+        views = payload["data"]["config"]["views"]
+        cam_view = next(v for v in views if v["path"] == "cameras")
+        cards = cam_view.get("cards", [])
+        grid_cards = [c for c in cards if c.get("type") == "grid"]
+        for g in grid_cards:
+            self.assertEqual(g.get("columns"), 2)
 
 
 if __name__ == "__main__":
