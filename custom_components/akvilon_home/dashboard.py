@@ -383,15 +383,39 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
         "heading": "Счётчики и коммунальные услуги",
         "heading_style": "subtitle",
     })
-    meter_tiles = [
-        {
+    meter_tiles = []
+    for m in meter_entities:
+        fname = r.get_friendly_name(m).replace("Счётчик Квартира 31 ", "").replace("Счётчик ", "")
+        icon = "mdi:counter"
+        color = "cyan"
+        flow = fname.lower()
+        if "день" in flow:
+            icon = "mdi:white-balance-sunny"
+            color = "amber"
+        elif "ночь" in flow:
+            icon = "mdi:weather-night"
+            color = "indigo"
+        elif "хвс" in flow:
+            icon = "mdi:water"
+            color = "blue"
+        elif "гвс" in flow:
+            icon = "mdi:water-boiler"
+            color = "red"
+        elif "отопление" in flow:
+            icon = "mdi:radiator"
+            color = "deep-orange"
+
+        meter_tiles.append({
             "type": "tile",
             "entity": m,
-            "name": r.get_friendly_name(m).replace("Счётчик Квартира 31 ", ""),
-            "icon": "mdi:counter",
-        }
-        for m in meter_entities
-    ]
+            "name": fname,
+            "icon": icon,
+            "color": color,
+            "state_content": [
+                "state",
+                "daily_delta_str",
+            ],
+        })
     if meter_tiles:
         overview_cards.append({
             "type": "grid",
@@ -665,28 +689,118 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
             "cards": tariff_tiles,
         })
 
-    # Показания счётчиков
+    # Показания и прозрачный контроль приборов учёта
     meter_cards.append({
         "type": "heading",
-        "heading": "Текущие показания приборов учёта",
+        "heading": "Контроль приборов учёта и расход за сегодня",
         "heading_style": "subtitle",
     })
-    readings = [
-        {
-            "type": "tile",
-            "entity": m,
-            "name": r.get_friendly_name(m).replace("Счётчик Квартира 31 ", ""),
-            "icon": "mdi:numeric",
-            "color": "cyan",
-        }
-        for m in meter_entities
-    ]
-    if readings:
+
+    # Сводная таблица контроля показаний
+    table_rows = []
+    for m in meter_entities:
+        fname = r.get_friendly_name(m).replace("Счётчик Квартира 31 ", "").replace("Счётчик ", "")
+        table_rows.append(
+            f"| **{fname}** "
+            f"| `{{{{ states('{m}') }}}} {{{{ state_attr('{m}', 'unit_of_measurement') }}}}` "
+            f"| `{{{{ state_attr('{m}', 'last_delta_str') }}}}` "
+            f"| `{{{{ state_attr('{m}', 'daily_delta_str') }}}}` "
+            f"| `{{{{ state_attr('{m}', 'daily_cost_str') }}}}` "
+            f"| {{{{ state_attr('{m}', 'last_changed_str') }}}} |"
+        )
+
+    summary_md = (
+        "> ℹ️ **Особенности автоматического сбора (АСКУЭ «Пульсар»):**\n"
+        "> Радиомодемы счётчиков в ЖК опрашиваются автоматикой УК **один раз в сутки ночью (~04:30)**.\n"
+        "> Пакет фиксирует накопленный расход за прошедшие сутки, после чего система обновляет показания.\n\n"
+        "| Прибор учёта | Текущее показание | С прошлой проверки (Δ) | С 00:00 (сегодня) | Сумма за сегодня | Последнее изменение |\n"
+        "| :--- | :---: | :---: | :---: | :---: | :---: |\n"
+        + "\n".join(table_rows)
+    )
+
+    meter_cards.append({
+        "type": "markdown",
+        "title": "📊 Сводка расхода и время изменений",
+        "content": summary_md,
+    })
+
+    detailed_cards = []
+    for m in meter_entities:
+        fname = r.get_friendly_name(m).replace("Счётчик Квартира 31 ", "").replace("Счётчик ", "")
+        icon = "mdi:counter"
+        flow = fname.lower()
+        if "день" in flow:
+            icon = "mdi:white-balance-sunny"
+        elif "ночь" in flow:
+            icon = "mdi:weather-night"
+        elif "хвс" in flow:
+            icon = "mdi:water"
+        elif "гвс" in flow:
+            icon = "mdi:water-boiler"
+        elif "отопление" in flow:
+            icon = "mdi:radiator"
+
+        detailed_cards.append({
+            "type": "entities",
+            "title": fname,
+            "icon": icon,
+            "entities": [
+                {
+                    "entity": m,
+                    "name": "Текущее показание",
+                    "icon": icon,
+                },
+                {
+                    "type": "attribute",
+                    "entity": m,
+                    "attribute": "last_changed_str",
+                    "name": "Дата и время изменения",
+                    "icon": "mdi:clock-check-outline",
+                },
+                {
+                    "type": "attribute",
+                    "entity": m,
+                    "attribute": "last_delta_str",
+                    "name": "Изменение с прошлой проверки",
+                    "icon": "mdi:delta",
+                },
+                {
+                    "type": "attribute",
+                    "entity": m,
+                    "attribute": "daily_delta_str",
+                    "name": "Расход с 0:00 сегодня",
+                    "icon": "mdi:calendar-today",
+                },
+                {
+                    "type": "attribute",
+                    "entity": m,
+                    "attribute": "daily_cost_str",
+                    "name": "Стоимость за сегодня",
+                    "icon": "mdi:currency-rub",
+                },
+                {
+                    "type": "attribute",
+                    "entity": m,
+                    "attribute": "reading_date_str",
+                    "name": "Замер модема (АСКУЭ)",
+                    "icon": "mdi:radio-tower",
+                },
+                {
+                    "type": "attribute",
+                    "entity": m,
+                    "attribute": "device_number",
+                    "name": "Заводской номер прибора",
+                    "icon": "mdi:identifier",
+                },
+            ],
+        })
+
+    if detailed_cards:
         meter_cards.append({
             "type": "grid",
             "columns": 2,
             "square": False,
-            "cards": readings,
+            "cards": detailed_cards,
         })
 
     # Аналитика затрат и учет энергоресурсов (Energy Dashboard)
@@ -950,7 +1064,6 @@ def _install_resource(hass: Any = None):
     cards = [
         ("akvilon-intercom-card.js", INTERCOM_CARD_RESOURCE),
         ("akvilon-camera-card.js", CAMERA_CARD_RESOURCE),
-        ("akvilon-energy-patch.js", "local/akvilon/akvilon-energy-patch.js"),
     ]
 
     for fname, res_rel in cards:

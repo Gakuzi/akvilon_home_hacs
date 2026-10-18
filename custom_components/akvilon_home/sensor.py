@@ -48,17 +48,25 @@ def _normalize_unit(unit: str):
 
 
 class AkvilonMeterSensor(SensorEntity):
-    """Показание прибора учёта (счётчика) квартиры."""
+    """Показание прибора учёта (счётчика) квартиры с контролем расхода и изменений."""
 
     _attr_has_entity_name = False
 
-    def __init__(self, meter: dict):
+    def __init__(self, meter: dict, hub=None, tariffs: dict | None = None):
         self.meter = meter
+        self.hub = hub
+        self.tariffs = tariffs or {}
         dn = _or_val(meter.get("deviceNumber") or meter.get("device_number"))
         name = meter.get("name") or "Счётчик"
         self._attr_unique_id = f"{DOMAIN}_meter_{dn}"
         self._label = name
         self._device_number = dn
+        self._object_id = str(meter.get("objectid") or meter.get("objectId") or "")
+
+    def _get_meter(self) -> dict:
+        if self.hub and hasattr(self.hub, "meter_by_id"):
+            return self.hub.meter_by_id(self._device_number) or self.hub.meter_by_id(self._object_id) or self.meter
+        return self.meter
 
     @property
     def name(self):
@@ -70,14 +78,16 @@ class AkvilonMeterSensor(SensorEntity):
 
     @property
     def native_value(self):
-        val = _meter_value(self.meter)
+        m = self._get_meter()
+        val = _meter_value(m)
         if val is None:
             return None
         return val
 
     @property
     def native_unit_of_measurement(self):
-        cur = _meter_current(self.meter)
+        m = self._get_meter()
+        cur = _meter_current(m)
         if isinstance(cur, dict):
             raw_unit = (cur.get("unit") or "").strip()
             return _normalize_unit(raw_unit)
@@ -89,7 +99,8 @@ class AkvilonMeterSensor(SensorEntity):
 
     @property
     def device_class(self):
-        t = str(self.meter.get("resourceType", ""))
+        m = self._get_meter()
+        t = str(m.get("resourceType", ""))
         if t in ("1",):  # electricity
             return "energy"
         if t in ("2", "3"):  # water
@@ -101,48 +112,87 @@ class AkvilonMeterSensor(SensorEntity):
         # Счётчики — накопительные показания (total_increasing).
         return "total_increasing"
 
+    def _get_tariff_rate(self) -> float:
+        m = self._get_meter()
+        t = str(m.get("resourceType", ""))
+        name = str(m.get("name", "")).lower()
+        tariffs = self.tariffs or (getattr(self.hub, "tariffs", {}) if self.hub else {})
+        if t == "1":
+            return float(tariffs.get("electricity_tariff_day", 8.67))
+        if t == "2" or "хвс" in name:
+            return float(tariffs.get("cold_water_tariff", 59.60)) + float(tariffs.get("sewage_tariff", 48.24))
+        if t == "3" or "гвс" in name:
+            return float(tariffs.get("hot_water_tariff", 210.00)) + float(tariffs.get("sewage_tariff", 48.24))
+        if t == "4" or "отопление" in name:
+            return float(tariffs.get("heating_tariff_gcal", 2550.00))
+        return 0.0
+
     @property
     def extra_state_attributes(self):
+        m = self._get_meter()
         attrs = {"integration": "akvilon_home"}
         attrs["device_number"] = self._device_number
-        attrs["resource_type"] = self.meter.get("resourceType")
-        attrs["meter_type"] = self.meter.get("meterType")
-        attrs["object_id"] = self.meter.get("objectid") or self.meter.get("objectId") or ""
-        cur = _meter_current(self.meter)
+        attrs["resource_type"] = m.get("resourceType")
+        attrs["meter_type"] = m.get("meterType")
+        attrs["object_id"] = self._object_id
+        cur = _meter_current(m)
+        dt = ""
         if isinstance(cur, dict):
-            attrs["reading_date"] = cur.get("dt")
+            dt = cur.get("dt") or ""
+            attrs["reading_date"] = dt
             if "values" in cur:
                 attrs["tariffs"] = cur["values"]
             raw_val = cur.get("value")
-            t = str(self.meter.get("resourceType", ""))
+            t = str(m.get("resourceType", ""))
             raw_unit = str(cur.get("unit") or "").lower()
             if t in ("4",) or "гкал" in raw_unit:
                 attrs["raw_value_gcal"] = raw_val
                 attrs["raw_unit"] = "Гкал"
+
+        # Метрики отслеживания изменений и контроля расхода
+        rate = self._get_tariff_rate()
+        val = self.native_value
+        unit = self.native_unit_of_measurement or ""
+        ent_id = getattr(self, "entity_id", None)
+        if self.hub and hasattr(self.hub, "meter_tracker"):
+            metrics = self.hub.meter_tracker.update_reading(
+                key=self._device_number,
+                current_value=val,
+                unit=unit,
+                reading_date=dt,
+                tariff_rate=rate,
+                entity_id=ent_id,
+                device_number=self._device_number,
+            )
+            attrs.update(metrics)
         return attrs
 
 
 class AkvilonMeterTariffSensor(SensorEntity):
-    """Отдельный сенсор тарифа двух-тарифного счётчика (День/Ночь).
-
-    Электричество приходит одним счётчиком с current.values = [T1, T2, T3, T4],
-    где value = сумма тарифов, а T1/T2 — тарифы «День»/«Ночь». Создаём по одному
-    сенсору на тариф с привязкой к тому же device_number.
-    """
+    """Отдельный сенсор тарифа двух-тарифного счётчика (День/Ночь) с контролем расхода."""
 
     _attr_has_entity_name = False
     _attr_device_class = "energy"
     _attr_state_class = "total_increasing"
     _attr_suggested_display_precision = 2
 
-    def __init__(self, meter: dict, tariff_index: int, tariff_label: str):
+    def __init__(self, meter: dict, tariff_index: int, tariff_label: str, hub=None, tariffs: dict | None = None):
         self.meter = meter
+        self.hub = hub
+        self.tariffs = tariffs or {}
         self.tariff_index = tariff_index
+        self._tariff_label = tariff_label
         self._label = (meter.get("name") or "Счётчик") + f" ({tariff_label})"
         dn = _or_val(meter.get("deviceNumber") or meter.get("device_number"))
         self._device_number = dn
+        self._object_id = str(meter.get("objectid") or meter.get("objectId") or "")
         self._attr_unique_id = f"{DOMAIN}_meter_{dn}_tariff{tariff_index}"
         self._tariff_number = tariff_index + 1
+
+    def _get_meter(self) -> dict:
+        if self.hub and hasattr(self.hub, "meter_by_id"):
+            return self.hub.meter_by_id(self._device_number) or self.hub.meter_by_id(self._object_id) or self.meter
+        return self.meter
 
     @property
     def name(self):
@@ -154,7 +204,8 @@ class AkvilonMeterTariffSensor(SensorEntity):
 
     @property
     def native_value(self):
-        cur = _meter_current(self.meter)
+        m = self._get_meter()
+        cur = _meter_current(m)
         if isinstance(cur, dict) and isinstance(cur.get("values"), list):
             vals = cur["values"]
             if self.tariff_index < len(vals):
@@ -165,39 +216,69 @@ class AkvilonMeterTariffSensor(SensorEntity):
     def native_unit_of_measurement(self):
         return "kWh"
 
+    def _get_tariff_rate(self) -> float:
+        tariffs = self.tariffs or (getattr(self.hub, "tariffs", {}) if self.hub else {})
+        if self.tariff_index == 0:
+            return float(tariffs.get("electricity_tariff_day", 8.67))
+        return float(tariffs.get("electricity_tariff_night", 3.91))
+
     @property
     def extra_state_attributes(self):
-        return {
+        m = self._get_meter()
+        cur = _meter_current(m)
+        dt = cur.get("dt") if isinstance(cur, dict) else ""
+        attrs = {
             "integration": "akvilon_home",
             "device_number": self._device_number,
-            "object_id": self.meter.get("objectid") or self.meter.get("objectId") or "",
+            "object_id": self._object_id,
             "tariff": f"T{self._tariff_number}",
             "tariff_index": self.tariff_index,
+            "reading_date": dt,
         }
+
+        rate = self._get_tariff_rate()
+        val = self.native_value
+        ent_id = getattr(self, "entity_id", None)
+        key = f"{self._device_number}_tariff{self.tariff_index}"
+        if self.hub and hasattr(self.hub, "meter_tracker"):
+            metrics = self.hub.meter_tracker.update_reading(
+                key=key,
+                current_value=val,
+                unit="kWh",
+                reading_date=dt,
+                tariff_rate=rate,
+                entity_id=ent_id,
+                device_number=self._device_number,
+            )
+            attrs.update(metrics)
+        return attrs
 
 
 class AkvilonMeterHeatingEnergySensor(SensorEntity):
-    """Сенсор отопления/теплоснабжения в ГДж (GJ) для раздела «Энергия» Home Assistant.
-
-    Home Assistant Energy в разделе «Газ» поддерживает GJ, kWh, MWh, m³ при device_class: energy или gas.
-    Этот сенсор пересчитывает Гкал в ГДж (1 Гкал = 4.1868 ГДж) для Energy Dashboard,
-    выступая источником в категории Газ/Теплоснабжение с тарифом теплоснабжения (RUB/GJ).
-    """
+    """Сенсор отопления/теплоснабжения в ГДж (GJ) для раздела «Энергия» с контролем расхода."""
 
     _attr_has_entity_name = False
-    _attr_device_class = "energy"
+    _attr_device_class = "gas"
     _attr_state_class = "total_increasing"
     _attr_native_unit_of_measurement = "GJ"
     _attr_icon = "mdi:radiator"
 
-    def __init__(self, meter: dict):
+    def __init__(self, meter: dict, hub=None, tariffs: dict | None = None):
         self.meter = meter
+        self.hub = hub
+        self.tariffs = tariffs or {}
         dn = _or_val(meter.get("deviceNumber") or meter.get("device_number"))
         name = meter.get("name") or "Счётчик Теплоснабжение"
         self._attr_unique_id = f"{DOMAIN}_meter_{dn}_gj"
         self._label = f"Теплоснабжение (ГДж)"
         self._device_number = dn
+        self._object_id = str(meter.get("objectid") or meter.get("objectId") or "")
         self._attr_suggested_object_id = "schetchik_kvartira_31_otoplenie_gdzh"
+
+    def _get_meter(self) -> dict:
+        if self.hub and hasattr(self.hub, "meter_by_id"):
+            return self.hub.meter_by_id(self._device_number) or self.hub.meter_by_id(self._object_id) or self.meter
+        return self.meter
 
     @property
     def name(self):
@@ -205,7 +286,8 @@ class AkvilonMeterHeatingEnergySensor(SensorEntity):
 
     @property
     def native_value(self):
-        val = _meter_value(self.meter)
+        m = self._get_meter()
+        val = _meter_value(m)
         if val is None:
             return None
         try:
@@ -219,21 +301,45 @@ class AkvilonMeterHeatingEnergySensor(SensorEntity):
 
     @property
     def device_class(self):
-        return "energy"
+        return "gas"
 
     @property
     def state_class(self):
         return "total_increasing"
 
+    def _get_tariff_rate(self) -> float:
+        tariffs = self.tariffs or (getattr(self.hub, "tariffs", {}) if self.hub else {})
+        return float(tariffs.get("heating_tariff_gj", 609.05))
+
     @property
     def extra_state_attributes(self):
-        cur = _meter_current(self.meter) or {}
-        return {
+        m = self._get_meter()
+        cur = _meter_current(m) or {}
+        dt = cur.get("dt") or ""
+        attrs = {
             "integration": DOMAIN,
             "device_number": self._device_number,
             "raw_value_gcal": cur.get("value"),
             "conversion": "1 Gcal = 4.1868 GJ",
+            "reading_date": dt,
         }
+
+        rate = self._get_tariff_rate()
+        val = self.native_value
+        ent_id = getattr(self, "entity_id", None)
+        key = f"{self._device_number}_gj"
+        if self.hub and hasattr(self.hub, "meter_tracker"):
+            metrics = self.hub.meter_tracker.update_reading(
+                key=key,
+                current_value=val,
+                unit="GJ",
+                reading_date=dt,
+                tariff_rate=rate,
+                entity_id=ent_id,
+                device_number=self._device_number,
+            )
+            attrs.update(metrics)
+        return attrs
 
 
 class AkvilonTariffPriceSensor(SensorEntity):
@@ -519,27 +625,14 @@ async def async_setup_entry(
 ) -> None:
     """Создаёт сенсоры из живых списков сервера."""
     hub = hass.data[DOMAIN][entry.entry_id]
-    sens = []
-    for m in hub.meters:
-        sens.append(AkvilonMeterSensor(m))
-        # Двух-тарифный счётчик (электричество): значения T1/T2 -> День/Ночь
-        cur = _meter_current(m)
-        vals = cur.get("values") if isinstance(cur, dict) else None
-        if isinstance(vals, list) and len(vals) >= 2:
-            sens.append(AkvilonMeterTariffSensor(m, 0, "День"))
-            sens.append(AkvilonMeterTariffSensor(m, 1, "Ночь"))
-        rtype = str(m.get("resourceType") or "")
-        name = str(m.get("name") or "").lower()
-        if rtype == "4" or "отопление" in name:
-            sens.append(AkvilonMeterHeatingEnergySensor(m))
-    for g in hub.gates:
-        gid = str(g.get("objectid") or g.get("objectId") or "")
-        if gid:
-            sens.append(AkvilonGateSensor(hub, gid, g.get("name") or "Калитка"))
-    for ic in hub.intercoms:
-        iid = str(ic.get("objectid") or ic.get("objectId") or "")
-        if iid:
-            sens.append(AkvilonIntercomSensor(hub, iid, ic.get("name") or "Домофон"))
+
+    # Настройка путей хранения и базы данных для MeterTracker
+    if hasattr(hub, "meter_tracker") and hasattr(hass, "config"):
+        import os
+        hub.meter_tracker._storage_dir = hass.config.path(".storage")
+        hub.meter_tracker._storage_file = os.path.join(hub.meter_tracker._storage_dir, "akvilon_meter_history.json")
+        hub.meter_tracker._db_path = hass.config.path("home-assistant_v2.db")
+        hub.meter_tracker._load()
 
     # Тарифные сенсоры стоимости ЖКУ (г. Архангельск, все валюты в рублях)
     from .tariffs import DEFAULT_TARIFFS
@@ -553,10 +646,34 @@ async def async_setup_entry(
         ("heating_tariff_gj", "Отопление (ГДж)", "RUB/GJ"),
     ]
     cur_tariffs = {}
+    sens = []
     for key, label, unit in tariff_defs:
         val = float(entry.data.get(key, DEFAULT_TARIFFS.get(key, 0.0)) or DEFAULT_TARIFFS.get(key, 0.0))
         cur_tariffs[key] = val
         sens.append(AkvilonTariffPriceSensor(key, label, unit, val))
+
+    hub.tariffs = cur_tariffs
+
+    for m in hub.meters:
+        sens.append(AkvilonMeterSensor(m, hub=hub, tariffs=cur_tariffs))
+        # Двух-тарифный счётчик (электричество): значения T1/T2 -> День/Ночь
+        cur = _meter_current(m)
+        vals = cur.get("values") if isinstance(cur, dict) else None
+        if isinstance(vals, list) and len(vals) >= 2:
+            sens.append(AkvilonMeterTariffSensor(m, 0, "День", hub=hub, tariffs=cur_tariffs))
+            sens.append(AkvilonMeterTariffSensor(m, 1, "Ночь", hub=hub, tariffs=cur_tariffs))
+        rtype = str(m.get("resourceType") or "")
+        name = str(m.get("name") or "").lower()
+        if rtype == "4" or "отопление" in name:
+            sens.append(AkvilonMeterHeatingEnergySensor(m, hub=hub, tariffs=cur_tariffs))
+    for g in hub.gates:
+        gid = str(g.get("objectid") or g.get("objectId") or "")
+        if gid:
+            sens.append(AkvilonGateSensor(hub, gid, g.get("name") or "Калитка"))
+    for ic in hub.intercoms:
+        iid = str(ic.get("objectid") or ic.get("objectId") or "")
+        if iid:
+            sens.append(AkvilonIntercomSensor(hub, iid, ic.get("name") or "Домофон"))
 
     # Диагностические и системные сенсоры
     sens.append(AkvilonServerLatencySensor(hub))

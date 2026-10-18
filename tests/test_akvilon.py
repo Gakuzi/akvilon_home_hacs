@@ -161,7 +161,7 @@ class TestSensorUnits(unittest.TestCase):
         energy_sensor = AkvilonMeterHeatingEnergySensor(fake_meter)
         self.assertAlmostEqual(energy_sensor.native_value, round(12.0872 * 4.1868, 4), places=4)
         self.assertEqual(energy_sensor.native_unit_of_measurement, "GJ")
-        self.assertEqual(energy_sensor.device_class, "energy")
+        self.assertEqual(energy_sensor.device_class, "gas")
 
 
 class TestDashboardAndFavorites(unittest.TestCase):
@@ -179,6 +179,16 @@ class TestDashboardAndFavorites(unittest.TestCase):
         self.assertIn("meters", view_paths)
         self.assertIn("diagnostics", view_paths)
         self.assertIn("kiosk", view_paths)
+
+        # Проверка карточек на виде meters
+        meters_view = next(v for v in views if v["path"] == "meters")
+        card_types = [c.get("type") for c in meters_view.get("cards", [])]
+        self.assertIn("energy-date-selection", card_types)
+        self.assertIn("energy-sources-table", card_types)
+        self.assertIn("energy-cost-graph", card_types)
+        self.assertIn("energy-gas-graph", card_types)
+        gas_card = next(c for c in meters_view.get("cards", []) if c.get("type") == "energy-gas-graph")
+        self.assertEqual(gas_card.get("title"), "🔥 Теплоснабжение (Отопление)")
 
     def test_dashboard_cameras_lazy_loading(self):
         from custom_components.akvilon_home.dashboard import build_dashboard_payload
@@ -219,5 +229,56 @@ class TestDashboardAndFavorites(unittest.TestCase):
             self.assertEqual(fav_grid.get("columns"), 2)
 
 
+class TestMeterTracker(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp()
+
+    def test_meter_tracking_deltas_and_cost(self):
+        from custom_components.akvilon_home.meter_tracker import MeterTracker
+        tracker = MeterTracker(storage_dir=self.tmpdir)
+
+        # 1. Первый замер (исходное показание в субботу)
+        attrs1 = tracker.update_reading(
+            key="10748182728594_tariff0",
+            current_value=7338.18,
+            unit="kWh",
+            reading_date="2026-10-17T15:01:28",
+            tariff_rate=8.67,
+        )
+        self.assertEqual(attrs1["last_delta"], 0.0)
+        self.assertEqual(attrs1["daily_delta"], 0.0)
+        self.assertEqual(attrs1["daily_cost"], 0.0)
+        self.assertIn("кВт·ч", attrs1["daily_delta_str"])
+
+        # 2. Повторный опрос без изменений
+        attrs2 = tracker.update_reading(
+            key="10748182728594_tariff0",
+            current_value=7338.18,
+            unit="kWh",
+            reading_date="2026-10-17T15:01:28",
+            tariff_rate=8.67,
+        )
+        self.assertEqual(attrs2["last_delta"], 0.0)
+
+        # 3. Ночное обновление модема (+8.59 кВт·ч)
+        attrs3 = tracker.update_reading(
+            key="10748182728594_tariff0",
+            current_value=7346.77,
+            unit="kWh",
+            reading_date="2026-10-18T01:26:56",
+            tariff_rate=8.67,
+        )
+        self.assertEqual(attrs3["last_delta"], 8.59)
+        self.assertEqual(attrs3["last_delta_str"], "+8.59 кВт·ч")
+        self.assertEqual(attrs3["daily_delta"], 8.59)
+        self.assertEqual(attrs3["daily_delta_str"], "+8.59 кВт·ч")
+        self.assertAlmostEqual(attrs3["daily_cost"], 74.48, places=2)
+        self.assertEqual(attrs3["reading_date"], "2026-10-18T01:26:56")
+        self.assertEqual(attrs3["reading_date_str"], "18.10.2026 01:26:56")
+        self.assertIn("18.10", attrs3["last_changed_str"])
+
+
 if __name__ == "__main__":
     unittest.main()
+

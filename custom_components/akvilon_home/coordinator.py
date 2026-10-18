@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 
 from .const import DOMAIN
+from .meter_tracker import MeterTracker
 from .protocol import AkvilonClient, CH_CAMERAS, CH_GATES, CH_METERS
 from .rtp_stream import RtpStream
 from .voice_rtp import VoiceStream
@@ -38,6 +39,8 @@ class AkvilonHub:
         self._cams = []
         self._gates = []
         self._meters = []
+        self.meter_tracker = MeterTracker()
+        self.tariffs = {}
         self._video_settings = {}  # cam_id -> dict(videoPort, videoHost, videoToken, sprop)
         self._frame_cache = {}     # cam_id -> (jpeg_bytes, timestamp)
         self._frame_locks = {}     # cam_id -> threading.Lock
@@ -307,6 +310,15 @@ class AkvilonHub:
     @property
     def intercoms(self) -> list:
         return [i for i in self._intercoms if self._is_selected(str(i.get("objectid") or i.get("objectId") or ""))]
+
+    def meter_by_id(self, meter_id: str):
+        """Находит счётчик по objectid или deviceNumber."""
+        for m in self._meters:
+            oid = str(m.get("objectid") or m.get("objectId") or "")
+            dn = str(m.get("deviceNumber") or m.get("device_number") or "")
+            if oid == str(meter_id) or dn == str(meter_id) or oid.split(":")[-1] == str(meter_id).split(":")[-1]:
+                return m
+        return None
 
     def gate_by_id(self, gate_id: str):
         """Находит калитку/вход по objectid (сравнение и по хвосту id)."""
