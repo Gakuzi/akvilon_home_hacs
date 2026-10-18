@@ -997,7 +997,7 @@ def _install_resource(hass: Any = None):
         changed = False
         for _, res_rel in cards:
             base_url = f"/{res_rel}"
-            versioned_url = f"/{res_rel}?v=2.4"
+            versioned_url = f"/{res_rel}?v=2.5"
             existing = next((i for i in items if i.get("url", "").startswith(base_url)), None)
             if existing:
                 if existing.get("url") != versioned_url:

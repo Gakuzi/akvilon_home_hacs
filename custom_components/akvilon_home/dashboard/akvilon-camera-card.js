@@ -16,7 +16,62 @@
  *     в Home Assistant и поднимает камеру в блок избранного вверху дашборда.
  *  4. Крупные информативные карточки предпросмотра:
  *     Широкий формат 16:9, высокое разрешение, плотное заполнение экрана без пустых полей.
- */
+// --- Автоматическая замена «Газ» на «Теплоснабжение» в разделе «Энергия» ---
+(function initAkvilonEnergyPatcher() {
+  function patchDOM() {
+    try {
+      document.querySelectorAll('paper-tab, ha-tab, [role="tab"], .tab-title, .mdc-tab__text-label').forEach(el => {
+        const txt = (el.textContent || '').trim();
+        if (txt === 'Газ' || txt === 'Gas') {
+          el.textContent = 'Теплоснабжение';
+        }
+      });
+      document.querySelectorAll('ha-card .card-header, ha-card h1, ha-card .title, ha-card .header-title').forEach(el => {
+        if (el.textContent && (el.textContent.includes('Потребление природного газа') || el.textContent.includes('Gas consumption'))) {
+          el.textContent = 'Теплоснабжение (Отопление)';
+        }
+      });
+      document.querySelectorAll('ha-card tr, ha-card .mdc-data-table__row').forEach(row => {
+        row.querySelectorAll('td, th, .mdc-data-table__cell').forEach(cell => {
+          if ((cell.textContent || '').trim() === 'Газ' || (cell.textContent || '').trim() === 'Gas') {
+            cell.textContent = 'Теплоснабжение';
+          }
+        });
+      });
+      document.querySelectorAll('svg text, .flow-label, .label, tspan').forEach(node => {
+        if ((node.textContent || '').trim() === 'Газ' || (node.textContent || '').trim() === 'Gas') {
+          node.textContent = 'Отопление';
+        }
+      });
+    } catch (_) {}
+  }
+
+  if (typeof window !== 'undefined' && !window.__akvilon_energy_patched) {
+    window.__akvilon_energy_patched = true;
+    patchDOM();
+    setInterval(patchDOM, 350);
+
+    const patchHass = () => {
+      try {
+        const ha = document.querySelector('home-assistant');
+        if (ha && ha.hass && ha.hass.localize) {
+          const orig = ha.hass.localize;
+          if (!orig.__akvilon_patched) {
+            ha.hass.localize = function(key, ...args) {
+              if (key === 'ui.panel.energy.title.gas') return 'Теплоснабжение';
+              if (key === 'ui.panel.energy.cards.energy_gas_graph_title') return 'Теплоснабжение (Отопление)';
+              if (key === 'ui.panel.lovelace.cards.energy.energy_sources_table.gas_total') return 'Теплоснабжение';
+              if (key === 'ui.panel.lovelace.cards.energy.energy_distribution.gas') return 'Отопление';
+              return orig.call(this, key, ...args);
+            };
+            ha.hass.localize.__akvilon_patched = true;
+          }
+        }
+      } catch (_) {}
+    };
+    setInterval(patchHass, 500);
+  }
+})();
 
 class AkvilonCameraCard extends HTMLElement {
   constructor() {
