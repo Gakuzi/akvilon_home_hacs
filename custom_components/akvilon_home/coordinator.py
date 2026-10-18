@@ -46,7 +46,7 @@ class AkvilonHub:
         self._frame_locks = {}     # cam_id -> threading.Lock
         self._cache_lock = threading.Lock()
         self._last_camera_open = {}  # cam_id -> float timestamp of last openCamera request
-        self._global_frame_sem = threading.Semaphore(1)  # max 1 concurrent camera frame grab (защита CPU и RAM)
+        self._global_frame_sem = threading.Semaphore(2)  # max 2 concurrent camera frame grab (защита CPU и RAM)
         self._last_ok = 0.0  # monotonic метка последнего успешного опроса сервера
         self._last_count = 0
         self.ping_ms = 0.0
@@ -655,7 +655,7 @@ class AkvilonHub:
 
         # 2. Неблокирующий семафор: если уже идёт декодирование другой камеры,
         # возвращаем последний известный кадр (до 60с) или None, не забивая пул executor'а
-        acquired_sem = self._global_frame_sem.acquire(timeout=0.25)
+        acquired_sem = self._global_frame_sem.acquire(timeout=4.0)
         if not acquired_sem:
             with self._cache_lock:
                 cached = self._frame_cache.get(sid)

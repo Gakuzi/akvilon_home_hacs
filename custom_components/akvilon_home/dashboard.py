@@ -1210,7 +1210,7 @@ def _install_resource(hass: Any = None):
             if not it.get("id"):
                 it["id"] = uuid.uuid4().hex
 
-        CARD_VERSION_TAG = "v=2.6.1"
+        CARD_VERSION_TAG = "v=2.6.2"
         changed = False
         for _, res_rel in cards:
             base_url = f"/{res_rel}"

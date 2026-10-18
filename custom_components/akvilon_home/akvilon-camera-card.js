@@ -280,7 +280,7 @@ class AkvilonCameraCard extends HTMLElement {
     const loader = this.shadowRoot.querySelector(".loader-spinner");
     if (!img) return;
 
-    const token = this._token || (stateObj.attributes && stateObj.attributes.access_token) || "";
+    const token = (stateObj.attributes && stateObj.attributes.access_token) || this._token || "";
     const ts = Date.now();
     const url = token
       ? `/api/camera_proxy/${entityId}?token=${token}&time=${ts}`
@@ -312,6 +312,14 @@ class AkvilonCameraCard extends HTMLElement {
     tempImg.onerror = () => {
       if (loader) loader.style.display = "none";
       // ВАЖНО: Если уже есть снимок, никогда его не стираем!
+      // Если кадр ещё ни разу не загрузился, повторяем через 3 сек
+      if (!this._loadedOnce && this._isVisible && !this._isPausedForLive) {
+        setTimeout(() => {
+          if (this._isVisible && !this._isPausedForLive && !this._loadedOnce) {
+            this._updateImage();
+          }
+        }, 3000);
+      }
     };
     tempImg.src = url;
   }
@@ -509,7 +517,8 @@ class AkvilonCameraCard extends HTMLElement {
 
     // Быстрый живой цикл обновления только для этой камеры (800 мс)
     const updateModalLive = () => {
-      const token = this._token || (stateObj?.attributes && stateObj.attributes.access_token) || "";
+      const liveState = (this._hass && this._hass.states[entityId]) || stateObj;
+      const token = (liveState?.attributes && liveState.attributes.access_token) || this._token || "";
       const ts = Date.now();
       const liveUrl = token
         ? `/api/camera_proxy/${entityId}?token=${token}&time=${ts}&live=1`
@@ -949,7 +958,9 @@ class AkvilonCameraCard extends HTMLElement {
   }
 }
 
-customElements.define("akvilon-camera-card", AkvilonCameraCard);
+if (!customElements.get("akvilon-camera-card")) {
+  customElements.define("akvilon-camera-card", AkvilonCameraCard);
+}
 
 /**
  * AkvilonCameraHub — хаб видеонаблюдения с боковым меню разделов,
@@ -1177,20 +1188,29 @@ class AkvilonCameraHub extends HTMLElement {
 
     // Рендерим ровно 4-6 карточек с плавным ступенчатым запуском
     pageSlice.forEach((cam, idx) => {
-      const card = document.createElement("akvilon-camera-card");
-      card.setConfig({
-        entity: cam.entity,
-        name: cam.name,
-        lazy: true,
-        refresh_interval: 25,
-        stagger_delay: idx * 500, // 0ms, 500ms, 1000ms, 1500ms, 2000ms, 2500ms
-        aspect_ratio: "16/9",
-      });
-      if (this._hass) {
+      let card;
+      try {
+        card = new AkvilonCameraCard();
+      } catch (_) {
+        card = document.createElement("akvilon-camera-card");
+      }
+      if (card && typeof card.setConfig === "function") {
+        card.setConfig({
+          entity: cam.entity,
+          name: cam.name,
+          lazy: true,
+          refresh_interval: 25,
+          stagger_delay: idx * 500, // 0ms, 500ms, 1000ms, 1500ms, 2000ms, 2500ms
+          aspect_ratio: "16/9",
+        });
+      }
+      if (this._hass && card) {
         card.hass = this._hass;
       }
-      grid.appendChild(card);
-      this._renderedCards.push(card);
+      if (card) {
+        grid.appendChild(card);
+        this._renderedCards.push(card);
+      }
     });
   }
 
@@ -1496,7 +1516,9 @@ class AkvilonCameraHub extends HTMLElement {
   }
 }
 
-customElements.define("akvilon-camera-hub", AkvilonCameraHub);
+if (!customElements.get("akvilon-camera-hub")) {
+  customElements.define("akvilon-camera-hub", AkvilonCameraHub);
+}
 
 // Регистрация в списке customCards Home Assistant
 window.customCards = window.customCards || [];
