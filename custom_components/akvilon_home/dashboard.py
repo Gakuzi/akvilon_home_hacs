@@ -143,9 +143,14 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
     latency_entity = r.resolve("sensor.akvilon_zaderzhka_servera")
     status_entity = r.resolve("sensor.akvilon_sostoianie_sistemy")
     tc_sensors = r.find("sensor.akvilon_stoimost_zhku")
-    total_cost_entity = tc_sensors[0] if tc_sensors else (
+    total_cost_entity = (
         r.resolve("sensor.akvilon_stoimost_zhku_za_mesiats")
         or r.resolve("sensor.akvilon_stoimost_zhku_za_mesiatc")
+        or (tc_sensors[0] if tc_sensors else "")
+    )
+    today_cost_entity = (
+        r.resolve("sensor.akvilon_raskhod_zhku_za_segodnia")
+        or r.resolve("sensor.akvilon_stoimost_zhku_za_segodnia")
     )
 
     # 2. Вызовы домофона
@@ -756,15 +761,35 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
         }
     ]
 
+    cost_tiles = []
     if total_cost_entity:
-        meter_cards.append({
+        cost_tiles.append({
             "type": "tile",
             "entity": total_cost_entity,
-            "name": "Итоговая расчетная стоимость ЖКУ за текущий объем",
+            "name": "Расчетная стоимость ЖКУ за текущий месяц",
             "icon": "mdi:cash-check",
             "color": "green",
             "vertical": False,
         })
+    if today_cost_entity:
+        cost_tiles.append({
+            "type": "tile",
+            "entity": today_cost_entity,
+            "name": "Расход ЖКУ за сегодня (с 00:00)",
+            "icon": "mdi:calendar-today",
+            "color": "blue",
+            "vertical": False,
+        })
+    if cost_tiles:
+        if len(cost_tiles) == 1:
+            meter_cards.append(cost_tiles[0])
+        else:
+            meter_cards.append({
+                "type": "grid",
+                "columns": 2,
+                "square": False,
+                "cards": cost_tiles,
+            })
 
     # Тарифы
     meter_cards.append({
@@ -796,6 +821,27 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
         "heading_style": "subtitle",
     })
 
+    meter_cards.append({
+        "type": "horizontal-stack",
+        "cards": [
+            {
+                "type": "markdown",
+                "content": "🟢 **Автоматический опрос активен (каждые 15 минут)**\n\n*Шлюз УК опрашивается в фоне без нагрузки на сеть (1.5 сек)*",
+            },
+            {
+                "type": "button",
+                "name": "Опросить счётчики сейчас",
+                "icon": "mdi:refresh",
+                "show_name": True,
+                "show_icon": True,
+                "tap_action": {
+                    "action": "call-service",
+                    "service": "akvilon_home.update_meters",
+                },
+            },
+        ],
+    })
+
     # Сводная таблица контроля показаний
     table_rows = []
     for m in meter_entities:
@@ -806,15 +852,15 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
             f"| `{{{{ state_attr('{m}', 'last_delta_str') }}}}` "
             f"| `{{{{ state_attr('{m}', 'daily_delta_str') }}}}` "
             f"| `{{{{ state_attr('{m}', 'daily_cost_str') }}}}` "
+            f"| {{{{ state_attr('{m}', 'last_check_str') }}}} "
             f"| {{{{ state_attr('{m}', 'last_changed_str') }}}} |"
         )
 
     summary_md = (
-        "> ℹ️ **Особенности автоматического сбора (АСКУЭ «Пульсар»):**\n"
-        "> Радиомодемы счётчиков в ЖК опрашиваются автоматикой УК **один раз в сутки ночью (~04:30)**.\n"
-        "> Пакет фиксирует накопленный расход за прошедшие сутки, после чего система обновляет показания.\n\n"
-        "| Прибор учёта | Текущее показание | С прошлой проверки (Δ) | С 00:00 (сегодня) | Сумма за сегодня | Последнее изменение |\n"
-        "| :--- | :---: | :---: | :---: | :---: | :---: |\n"
+        "> 🟢 **Автоматический опрос активен (каждые 15 минут)** · Связь с сервером УК в норме.\n"
+        "> ℹ️ *Радиомодемы счётчиков «Пульсар» в ЖК опрашиваются автоматикой УК **один раз в сутки ночью (~04:30)**, поэтому показания меняются 1 раз в сутки, а опрос сервера выполняется регулярно каждые 15 минут.*\n\n"
+        "| Прибор учёта | Текущее показание | С прошлой проверки (Δ) | С 00:00 (сегодня) | Сумма за сегодня | Проверка сервера | Дата изменения |\n"
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |\n"
         + "\n".join(table_rows)
     )
 
@@ -849,6 +895,13 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
                     "entity": m,
                     "name": "Текущее показание",
                     "icon": icon,
+                },
+                {
+                    "type": "attribute",
+                    "entity": m,
+                    "attribute": "last_check_str",
+                    "name": "Проверка сервера УК",
+                    "icon": "mdi:cloud-check",
                 },
                 {
                     "type": "attribute",
@@ -1173,12 +1226,10 @@ def _install_resource(hass: Any = None):
             dest_file = os.path.join(dest_dir, fname)
 
             search_dirs = [
-                os.path.dirname(__file__),
                 os.path.join(os.path.dirname(__file__), "dashboard"),
-                "/config/custom_components/akvilon_home",
-                "/config/custom_components/akvilon_home/dashboard",
-                "/Users/evgeniy/akvilon_home",
+                os.path.dirname(__file__),
                 "/Users/evgeniy/akvilon_home/dashboard",
+                "/config/custom_components/akvilon_home/dashboard",
             ]
             src_file = None
             for d in search_dirs:
@@ -1210,22 +1261,21 @@ def _install_resource(hass: Any = None):
             if not it.get("id"):
                 it["id"] = uuid.uuid4().hex
 
-        CARD_VERSION_TAG = "v=2.6.2"
         changed = False
         for _, res_rel in cards:
             base_url = f"/{res_rel}"
-            versioned_url = f"/{res_rel}?{CARD_VERSION_TAG}"
-            # Удаляем все старые/дублирующие записи этого ресурса
-            filtered_items = [it for it in items if not it.get("url", "").startswith(base_url)]
-            # Добавляем единственный актуальный ресурс
-            filtered_items.append({
-                "id": uuid.uuid4().hex,
-                "type": "module",
-                "url": versioned_url,
-            })
-            if filtered_items != items:
-                items = filtered_items
-                res["data"]["items"] = items
+            versioned_url = f"/{res_rel}?v=2.8.0"
+            existing = next((i for i in items if i.get("url", "").startswith(base_url)), None)
+            if existing:
+                if existing.get("url") != versioned_url:
+                    existing["url"] = versioned_url
+                    changed = True
+            else:
+                items.append({
+                    "id": uuid.uuid4().hex,
+                    "type": "module",
+                    "url": versioned_url,
+                })
                 changed = True
                 _LOGGER.info("Аквилон: JS-ресурс %s зарегистрирован в lovelace_resources", versioned_url)
 

@@ -961,6 +961,7 @@ class AkvilonCameraCard extends HTMLElement {
 if (!customElements.get("akvilon-camera-card")) {
   customElements.define("akvilon-camera-card", AkvilonCameraCard);
 }
+window.AkvilonCameraCard = AkvilonCameraCard;
 
 /**
  * AkvilonCameraHub — хаб видеонаблюдения с боковым меню разделов,
@@ -1194,16 +1195,29 @@ class AkvilonCameraHub extends HTMLElement {
       } catch (_) {
         card = document.createElement("akvilon-camera-card");
       }
-      if (card && typeof card.setConfig === "function") {
-        card.setConfig({
-          entity: cam.entity,
-          name: cam.name,
-          lazy: true,
-          refresh_interval: 25,
-          stagger_delay: idx * 500, // 0ms, 500ms, 1000ms, 1500ms, 2000ms, 2500ms
-          aspect_ratio: "16/9",
+      const applyConfig = (c) => {
+        if (c && typeof c.setConfig === "function") {
+          try {
+            c.setConfig({
+              entity: cam.entity,
+              name: cam.name,
+              lazy: true,
+              refresh_interval: 25,
+              stagger_delay: idx * 500, // 0ms, 500ms, 1000ms, 1500ms, 2000ms, 2500ms
+              aspect_ratio: "16/9",
+            });
+          } catch (_) {}
+        }
+      };
+
+      applyConfig(card);
+      if (card && typeof card.setConfig !== "function") {
+        customElements.whenDefined("akvilon-camera-card").then(() => {
+          applyConfig(card);
+          if (this._hass && card) card.hass = this._hass;
         });
       }
+
       if (this._hass && card) {
         card.hass = this._hass;
       }
