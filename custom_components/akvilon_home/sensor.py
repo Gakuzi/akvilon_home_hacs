@@ -179,13 +179,13 @@ class AkvilonMeterTariffSensor(SensorEntity):
 class AkvilonMeterHeatingEnergySensor(SensorEntity):
     """Сенсор отопления/теплоснабжения в ГДж (GJ) для раздела «Энергия» Home Assistant.
 
-    Home Assistant Energy в разделе «Газ» поддерживает GJ, kWh, MWh, m³ при device_class: gas.
+    Home Assistant Energy в разделе «Газ» поддерживает GJ, kWh, MWh, m³ при device_class: energy или gas.
     Этот сенсор пересчитывает Гкал в ГДж (1 Гкал = 4.1868 ГДж) для Energy Dashboard,
     выступая источником в категории Газ/Теплоснабжение с тарифом теплоснабжения (RUB/GJ).
     """
 
     _attr_has_entity_name = False
-    _attr_device_class = "gas"
+    _attr_device_class = "energy"
     _attr_state_class = "total_increasing"
     _attr_native_unit_of_measurement = "GJ"
     _attr_icon = "mdi:radiator"
@@ -219,7 +219,7 @@ class AkvilonMeterHeatingEnergySensor(SensorEntity):
 
     @property
     def device_class(self):
-        return "gas"
+        return "energy"
 
     @property
     def state_class(self):

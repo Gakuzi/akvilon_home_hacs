@@ -17,7 +17,11 @@
  *
  * Регистрация: window.customCards.push({ type: "akvilon-intercom-card" }).
  */
-/* global customElements, LitElement, html, css, fireEvent */
+import {
+  LitElement,
+  html,
+  css,
+} from "https://unpkg.com/lit-element@2.4.0/lit-element.js?module";
 
 const CARD_VERSION = "2.0.0";
 const IS_ON = new Set(["on", "true", "1", "yes", "open", "ring", "active"]);

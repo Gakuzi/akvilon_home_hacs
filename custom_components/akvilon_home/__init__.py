@@ -278,6 +278,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as exc:  # pragma: no cover
             _LOGGER.warning("Аквилон: не удалось настроить раздел «Энергия»: %s", exc)
 
+        # Регистрация глобального JS-патча для страницы /energy
+        try:
+            from homeassistant.components.frontend import add_extra_js_url
+            add_extra_js_url(hass, "/local/akvilon/akvilon-energy-patch.js?v=1.1")
+        except Exception:  # pragma: no cover
+            pass
+
     hass.loop.create_task(_setup_after_data())
     # Периодическое обновление данных с сервера (камеры/калитки/счётчики/домофоны)
     prev = {"cameras": set(), "gates": set(), "meters": set(), "intercoms": set()}

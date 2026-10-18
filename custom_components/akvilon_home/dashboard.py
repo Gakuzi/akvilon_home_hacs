@@ -950,6 +950,7 @@ def _install_resource(hass: Any = None):
     cards = [
         ("akvilon-intercom-card.js", INTERCOM_CARD_RESOURCE),
         ("akvilon-camera-card.js", CAMERA_CARD_RESOURCE),
+        ("akvilon-energy-patch.js", "local/akvilon/akvilon-energy-patch.js"),
     ]
 
     for fname, res_rel in cards:
