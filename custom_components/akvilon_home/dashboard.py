@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 from typing import Any
 
@@ -60,11 +61,14 @@ class _Resolver:
     def __init__(self, hass: Any | None):
         self._entities = set()
         self._states = {}
+        self._names = {}
         if hass is not None:
             try:
                 for state in hass.states.async_all():
                     self._entities.add(state.entity_id)
                     self._states[state.entity_id] = state
+                    if state.attributes.get("friendly_name"):
+                        self._names[state.entity_id] = state.attributes["friendly_name"]
             except Exception:
                 pass
             try:
@@ -73,6 +77,9 @@ class _Resolver:
                 for entry in reg.entities.values():
                     if entry.entity_id:
                         self._entities.add(entry.entity_id)
+                        n = getattr(entry, "name", None) or getattr(entry, "original_name", None)
+                        if n:
+                            self._names[entry.entity_id] = n
             except Exception:
                 pass
 
@@ -88,6 +95,9 @@ class _Resolver:
                         eid = item.get("entity_id")
                         if eid:
                             self._entities.add(eid)
+                            n = item.get("name") or item.get("original_name")
+                            if n:
+                                self._names[eid] = n
             except Exception:
                 pass
 
@@ -116,6 +126,8 @@ class _Resolver:
         st = self._states.get(eid)
         if st and st.attributes.get("friendly_name"):
             return st.attributes["friendly_name"]
+        if eid in self._names:
+            return self._names[eid]
         return eid.split(".")[-1].replace("_", " ").title()
 
 
@@ -138,7 +150,11 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
 
     # 2. Вызовы домофона
     call_sensors = r.find("binary_sensor.akvilon_home_intercom_call")
-    call_sensor = call_sensors[0] if call_sensors else r.resolve("binary_sensor.akvilon_home_intercom_call_1")
+    call_sensor = (
+        call_sensors[0] if call_sensors
+        else (r.resolve("binary_sensor.domofon_vkhodiashchii_vyzov")
+              or r.resolve("binary_sensor.akvilon_home_intercom_call_1") or "")
+    )
 
     # 3. Камеры
     cam_ids = r.find("camera.")
@@ -180,11 +196,81 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
             fav_cams = cam_ids[:4]
 
     # 4. Калитки и двери
-    gate_btns = r.find("button.otkryt_kalitka")
-    dom_btns = r.find("button.otkryt_domofon") + r.find("button.otkryt_reka")
-    all_door_btns = gate_btns + dom_btns
+    all_door_btns = r.find("button.otkryt_")
+    dom_btns = [b for b in all_door_btns if "domofon" in b]
+    gate_btns = [b for b in all_door_btns if "domofon" not in b]
     gate_state = r.find("sensor.kalitka")
     dom_sensors = r.find("sensor.domofon")
+
+    def _door_sort_key(btn: str) -> tuple[int, int, str]:
+        m = re.search(r"kalitka_(\d+)", btn)
+        if m:
+            return (0, int(m.group(1)), btn)
+        m = re.search(r"(\d+)_(\d+)", btn)
+        if m:
+            return (1, int(m.group(1)) * 10 + int(m.group(2)), btn)
+        return (2, 0, btn)
+
+    gate_btns.sort(key=_door_sort_key)
+    dom_btns.sort(key=_door_sort_key)
+    all_door_btns = gate_btns + dom_btns
+
+    def _find_camera_for_door(btn: str) -> str:
+        b = btn.lower()
+        m = re.search(r"kalitka_(\d+)", b)
+        if m:
+            num = m.group(1)
+            for c in cam_ids:
+                clow = c.lower()
+                if f"kalitka_{num}_" in clow or clow.endswith(f"kalitka_{num}"):
+                    return c
+            if num == "1":
+                for c in cam_ids:
+                    if "vid_na_kalitku" in c.lower() and "vid_na_kalitku_2" not in c.lower():
+                        return c
+            elif num == "2":
+                for c in cam_ids:
+                    if "vid_na_kalitku_2" in c.lower():
+                        return c
+
+        if "1_1" in b:
+            for c in cam_ids:
+                if "paradnaia_1_1" in c.lower() or "prokhod_1_1" in c.lower():
+                    return c
+        if "1_2" in b:
+            for c in cam_ids:
+                if "paradnaia_1_2" in c.lower() or "prokhod_1_2" in c.lower():
+                    return c
+
+        core = b.split("button.otkryt_")[-1].replace("domofon_", "").replace("kalitka_", "")
+        if len(core) >= 3:
+            for c in cam_ids:
+                if core in c.lower():
+                    return c
+        return ""
+
+    def _find_status_for_door(btn: str, is_domofon: bool = False) -> str:
+        b = btn.lower()
+        core = b.replace("button.otkryt_", "")
+        m = re.search(r"kalitka_(\d+)", core)
+        if m:
+            num = m.group(1)
+            sensors = dom_sensors if is_domofon else gate_state
+            for s in sensors:
+                slow = s.lower()
+                if f"kalitka_{num}_" in slow or slow.endswith(f"kalitka_{num}"):
+                    return s
+        if is_domofon:
+            for s in dom_sensors:
+                slow = s.lower()
+                if core in slow or core.replace("domofon_", "") in slow:
+                    return s
+        else:
+            for s in gate_state:
+                slow = s.lower()
+                if core in slow:
+                    return s
+        return ""
 
     # 5. Счётчики и тарифы (фильтруем служебные _cost, технический _gj и дубли общего электричества)
     all_meters = r.find("sensor.schetchik")
@@ -559,11 +645,16 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
     ]
 
     intercom_gate_cards = []
-    for btn in all_door_btns:
-        core = btn.split("button.otkryt_")[-1]
-        status = next((s for s in gate_state if core in s), "")
-        cam = next((c for c in cam_ids if core in c or core.replace("kalitka_", "") in c), "")
-        title = r.get_friendly_name(btn).replace("Открыть ", "")
+    for btn in gate_btns:
+        cam = _find_camera_for_door(btn)
+        status = _find_status_for_door(btn, is_domofon=False)
+        title = r.get_friendly_name(btn)
+        for pfx in ("Открыть ", "открыть ", "Otkryt ", "otkryt "):
+            if title.startswith(pfx):
+                title = title[len(pfx):]
+        title = title.replace("Reka4, Prohod", "Река 4, Проход").replace("Reka 4, Проход", "Река 4, Проход")
+        if title.startswith("Kalitka "):
+            title = "Калитка " + title.replace("Kalitka ", "")
         intercom_gate_cards.append(intercom_card(title, btn, cam, status, call_sensor))
 
     if intercom_gate_cards:
@@ -630,10 +721,19 @@ def build_dashboard_payload(hass: Any = None, hub=None) -> dict:
 
     dom_specific_cards = []
     for btn in dom_btns:
-        key = btn.split("button.otkryt_")[-1]
-        status = next((s for s in dom_sensors if (key.replace("domofon_", "") in s)), "")
-        cam = next((c for c in cam_ids if key.replace("domofon_", "") in c), "")
-        title = r.get_friendly_name(btn).replace("Открыть ", "")
+        cam = _find_camera_for_door(btn)
+        status = _find_status_for_door(btn, is_domofon=True)
+        title = r.get_friendly_name(btn)
+        for pfx in ("Открыть домофон ", "открыть домофон ", "Открыть ", "открыть ", "Otkryt Domofon ", "otkryt domofon ", "Otkryt ", "otkryt "):
+            if title.startswith(pfx):
+                title = title[len(pfx):]
+        title = title.replace("Reka4, Prohod", "Река 4, Проход").replace("Reka 4, Проход", "Река 4, Проход")
+        if title.startswith("Kalitka "):
+            title = "Калитка " + title.replace("Kalitka ", "")
+        if not title.lower().startswith("видеодомофон") and not title.lower().startswith("домофон"):
+            title = f"Видеодомофон {title}"
+        elif title.lower().startswith("домофон"):
+            title = "Видео" + title
         dom_specific_cards.append(intercom_card(title, btn, cam, status, call_sensor))
 
     if dom_specific_cards:

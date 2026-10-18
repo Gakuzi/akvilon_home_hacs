@@ -632,12 +632,21 @@ class AkvilonCameraCard extends HTMLElement {
   }
 
   _handleOpenGate(e) {
-    e.stopPropagation();
-    if (!this._hass || !this._config?.entity) return;
-    const stateObj = this._hass.states[this._config.entity];
-    const gateId = stateObj?.attributes?.gate_id;
+    if (e) e.stopPropagation();
+    if (!this._hass) return;
+    const btnEntity = this._config?.gate_button;
+    if (btnEntity && this._hass.states[btnEntity]) {
+      this._hass.callService("button", "press", { entity_id: btnEntity });
+      this._showToast("🚪 Команда на открытие отправлена!");
+      return;
+    }
+    const stateObj = this._hass.states[this._config?.entity];
+    const gateId = stateObj?.attributes?.gate_id || this._config?.gate_id;
     if (gateId) {
       this._hass.callService("akvilon_home", "open_gate", { gate_id: gateId });
+      this._showToast("🚪 Команда на открытие отправлена!");
+    } else if (btnEntity) {
+      this._hass.callService("button", "press", { entity_id: btnEntity });
       this._showToast("🚪 Команда на открытие отправлена!");
     }
   }
@@ -660,8 +669,10 @@ class AkvilonCameraCard extends HTMLElement {
       this._updateFavoriteUI(isFav);
     }
 
-    if (gateBtn && stateObj.attributes?.domofon) {
-      gateBtn.style.display = "inline-flex";
+    if (gateBtn) {
+      if (this._config?.gate_button || stateObj?.attributes?.domofon || stateObj?.attributes?.gate_id) {
+        gateBtn.style.display = "inline-flex";
+      }
     }
   }
 
