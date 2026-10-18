@@ -1173,10 +1173,12 @@ def _install_resource(hass: Any = None):
             dest_file = os.path.join(dest_dir, fname)
 
             search_dirs = [
-                os.path.join(os.path.dirname(__file__), "dashboard"),
                 os.path.dirname(__file__),
-                "/Users/evgeniy/akvilon_home/dashboard",
+                os.path.join(os.path.dirname(__file__), "dashboard"),
+                "/config/custom_components/akvilon_home",
                 "/config/custom_components/akvilon_home/dashboard",
+                "/Users/evgeniy/akvilon_home",
+                "/Users/evgeniy/akvilon_home/dashboard",
             ]
             src_file = None
             for d in search_dirs:
@@ -1208,21 +1210,22 @@ def _install_resource(hass: Any = None):
             if not it.get("id"):
                 it["id"] = uuid.uuid4().hex
 
+        CARD_VERSION_TAG = "v=2.6.1"
         changed = False
         for _, res_rel in cards:
             base_url = f"/{res_rel}"
-            versioned_url = f"/{res_rel}?v=2.5"
-            existing = next((i for i in items if i.get("url", "").startswith(base_url)), None)
-            if existing:
-                if existing.get("url") != versioned_url:
-                    existing["url"] = versioned_url
-                    changed = True
-            else:
-                items.append({
-                    "id": uuid.uuid4().hex,
-                    "type": "module",
-                    "url": versioned_url,
-                })
+            versioned_url = f"/{res_rel}?{CARD_VERSION_TAG}"
+            # Удаляем все старые/дублирующие записи этого ресурса
+            filtered_items = [it for it in items if not it.get("url", "").startswith(base_url)]
+            # Добавляем единственный актуальный ресурс
+            filtered_items.append({
+                "id": uuid.uuid4().hex,
+                "type": "module",
+                "url": versioned_url,
+            })
+            if filtered_items != items:
+                items = filtered_items
+                res["data"]["items"] = items
                 changed = True
                 _LOGGER.info("Аквилон: JS-ресурс %s зарегистрирован в lovelace_resources", versioned_url)
 
